@@ -7,8 +7,7 @@ from datetime import datetime, timedelta
 from simple_salesforce import Salesforce
 from DrissionPage import ChromiumPage, ChromiumOptions
 
-# ================= CONFIGURATION =================
-# Secrets from GitHub Environment
+# Secrets
 SF_USERNAME = os.getenv('SF_USERNAME')
 SF_PASSWORD = os.getenv('SF_PASSWORD')
 SF_TOKEN    = os.getenv('SF_TOKEN')
@@ -25,7 +24,6 @@ SALES_API_DATE = 'Last_Activity_Date_V__c'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(message)s')
 
-# ================= EMAIL FUNCTION =================
 def send_email_msg(subject, body):
     if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
         logging.warning("Email secrets missing. Skipping notification.")
@@ -43,10 +41,8 @@ def send_email_msg(subject, body):
     except Exception as e:
         logging.error(f"Failed to send email: {e}")
 
-# ================= SALESFORCE CONNECTION =================
 def get_sf_connection():
     try:
-        # Standard Token Login
         sf = Salesforce(username=SF_USERNAME, password=SF_PASSWORD, security_token=SF_TOKEN)
         logging.info("Connected to Salesforce API")
         return sf
@@ -55,7 +51,7 @@ def get_sf_connection():
         send_email_msg("Script Failed", f"Salesforce Connection Error: {e}")
         sys.exit(1)
 
-# ================= HELPERS =================
+# ... [Helpers same as before] ...
 def get_this_week_soql_filter():
     today = datetime.now()
     start_of_week = today - timedelta(days=today.weekday())
@@ -79,14 +75,11 @@ def convert_date_for_api(date_str):
     try: return datetime.strptime(date_str, '%d-%b-%Y').strftime('%Y-%m-%d')
     except: return None
 
-# ================= SCRAPING LOGIC =================
 def scrape_record(browser, rec_id, obj_type):
     url = BASE_URL.format(obj=obj_type, id=rec_id)
     try:
         browser.get(url)
         browser.wait.doc_loaded(timeout=15)
-        
-        # Expand & Scroll
         try:
             if browser.ele('xpath://button[contains(text(), "Show All")]', timeout=3):
                 browser.ele('xpath://button[contains(text(), "Show All")]').click()
@@ -96,10 +89,8 @@ def scrape_record(browser, rec_id, obj_type):
                 if btn.is_displayed and "Collapse" not in btn.text:
                     browser.driver.execute_script("arguments[0].click();", btn)
         except: pass
-
         browser.scroll.to_bottom(); browser.wait(1)
         
-        # Filter Dates
         cutoff_y = 0
         markers = browser.eles('css:.slds-timeline__date', timeout=2)
         if markers: cutoff_y = markers[0].rect.location['y']
@@ -111,28 +102,33 @@ def scrape_record(browser, rec_id, obj_type):
             if cutoff_y > 0 and d.rect.location['y'] < cutoff_y: continue
             cl = clean_activity_date(d.text)
             if cl: valid_dates.append(cl)
-
         return len(valid_dates), (valid_dates[0] if valid_dates else None)
-    except Exception as e:
-        logging.error(f"Error scraping {rec_id}: {e}")
-        return 0, None
+    except: return 0, None
 
-# ================= MAIN EXECUTION =================
 def main():
     sf = get_sf_connection()
     
-    # Setup Browser (Headless for Server)
+    # === UPDATED BROWSER SETTINGS (CRITICAL FOR GITHUB) ===
     co = ChromiumOptions()
-    co.set_argument('--headless=new') 
+    co.set_argument('--headless=new')
     co.set_argument('--no-sandbox')
-    browser = ChromiumPage(addr_or_opts=co)
+    # Ye 2 lines nayi hain (Crash rokne ke liye):
+    co.set_argument('--disable-gpu')
+    co.set_argument('--disable-dev-shm-usage') 
     
-    # Auto Login Browser using API Session
+    try:
+        browser = ChromiumPage(addr_or_opts=co)
+    except Exception as e:
+        logging.error(f"Browser Launch Failed: {e}")
+        send_email_msg("Browser Error", str(e))
+        sys.exit(1)
+    
+    # Auto Login
     domain = BASE_URL.split('/')[2]
     browser.get(f"https://{domain}/secur/frontdoor.jsp?sid={sf.session_id}")
     browser.wait.doc_loaded()
 
-    # Prepare Data
+    # Queries
     start_dt, end_dt = get_this_week_soql_filter()
     mkt_query = f"SELECT Id FROM Lead WHERE LeadSource = 'Marketing Inbound' AND CreatedDate >= {start_dt} AND CreatedDate <= {end_dt}"
     target_owners = "('Harshit Gupta', 'Abhishek Nayak', 'Deepesh Dubey', 'Prashant Jha')"
@@ -141,31 +137,26 @@ def main():
     try:
         mkt_recs = sf.query_all(mkt_query)['records']
         sales_recs = sf.query_all(sales_query)['records']
-        
         start_msg = f"🚀 Started updating {len(mkt_recs)} Marketing Leads and {len(sales_recs)} Sales Accounts."
         send_email_msg("Salesforce Bot Started", start_msg)
-        
     except Exception as e:
         send_email_msg("Error Fetching Data", str(e))
         browser.quit(); sys.exit(1)
 
-    # Process Marketing
     mkt_success = 0
-    logging.info(f"Processing {len(mkt_recs)} Marketing Leads...")
+    logging.info(f"Processing {len(mkt_recs)} Leads...")
     for rec in mkt_recs:
         lid = rec['Id']
         count, last_date = scrape_record(browser, lid, 'Lead')
         try:
             payload = {MKT_API_COUNT: count}
             if api_date := convert_date_for_api(last_date): payload[MKT_API_DATE] = api_date
-            
             sf.Lead.update(lid, payload)
             mkt_success += 1
-        except Exception as e: logging.error(f"Failed Lead {lid}: {e}")
+        except: pass
 
-    # Process Sales
     sales_success = 0
-    logging.info(f"Processing {len(sales_recs)} Sales Accounts...")
+    logging.info(f"Processing {len(sales_recs)} Accounts...")
     for rec in sales_recs:
         aid = rec['Id']
         count, last_date = scrape_record(browser, aid, 'Account')
@@ -173,10 +164,9 @@ def main():
             if api_date := convert_date_for_api(last_date):
                 sf.Account.update(aid, {SALES_API_DATE: api_date})
                 sales_success += 1
-        except Exception as e: logging.error(f"Failed Account {aid}: {e}")
+        except: pass
 
     browser.quit()
-    
     end_msg = f"✅ Update complete: {mkt_success} Leads and {sales_success} Accounts updated successfully."
     send_email_msg("Salesforce Bot Success", end_msg)
 
