@@ -6,9 +6,8 @@ import smtplib
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 from simple_salesforce import Salesforce
-from bs4 import BeautifulSoup
 
-# Selenium Imports
+# Selenium Imports (Stable for GitHub)
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -22,7 +21,7 @@ SF_USERNAME = os.getenv('SF_USERNAME')
 SF_PASSWORD = os.getenv('SF_PASSWORD')
 SF_TOKEN    = os.getenv('SF_TOKEN')
 
-# Email Config
+# Email Config (Wapas aa gaya)
 EMAIL_SENDER   = os.getenv('EMAIL_SENDER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
 EMAIL_RECEIVER = os.getenv('EMAIL_RECEIVER')
@@ -34,10 +33,10 @@ SALES_API_DATE = 'Last_Activity_Date_V__c'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(message)s')
 
-# ================= EMAIL HELPER =================
+# ================= EMAIL NOTIFICATION =================
 def send_email_msg(subject, body):
     if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
-        logging.warning("Email secrets missing. Skipping.")
+        logging.warning("Email secrets missing. Skipping notification.")
         return
     try:
         msg = EmailMessage()
@@ -63,7 +62,7 @@ def get_sf_connection():
         send_email_msg("Script Failed", f"Salesforce Connection Error: {e}")
         sys.exit(1)
 
-# ================= DATE HELPERS =================
+# ================= DATE HELPERS (LOGIC: TODAY/YESTERDAY) =================
 def get_this_week_soql_filter():
     today = datetime.now()
     start_of_week = today - timedelta(days=today.weekday())
@@ -76,6 +75,7 @@ def clean_activity_date(text):
     text = text.split('|')[-1].strip()
     text_lower = text.lower()
     now = datetime.now()
+    # Logic: Convert text to real dates
     if 'today' in text_lower: return now.strftime('%d-%b-%Y')
     elif 'yesterday' in text_lower: return (now - timedelta(days=1)).strftime('%d-%b-%Y')
     elif 'tomorrow' in text_lower: return (now + timedelta(days=1)).strftime('%d-%b-%Y')
@@ -87,36 +87,33 @@ def convert_date_for_api(date_str):
     try: return datetime.strptime(date_str, '%d-%b-%Y').strftime('%Y-%m-%d')
     except: return None
 
-# ================= BROWSER SETUP (SELENIUM) =================
+# ================= BROWSER SETUP =================
 def get_selenium_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new") # Important for Server
+    chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     
-    # Auto-install ChromeDriver
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
-# ================= SCRAPING LOGIC =================
+# ================= SCRAPING LOGIC (ALL YOUR LOGIC HERE) =================
 def scrape_record(driver, rec_id, obj_type):
     url = BASE_URL.format(obj=obj_type, id=rec_id)
     try:
         driver.get(url)
         
-        # Wait for page load (Timeline element to appear)
+        # Wait for Timeline
         try:
             WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, ".slds-timeline__item"))
             )
-        except:
-            # Sometimes timeline is empty, that's fine
-            pass
+        except: pass
 
-        # 1. Expand "Show All" or "View More" buttons using JS
+        # 1. Logic: Expand "Show All"
         try:
             buttons = driver.find_elements(By.XPATH, "//button[contains(text(), 'Show All') or contains(@class, 'testonly-expandAll')]")
             for btn in buttons:
@@ -124,7 +121,7 @@ def scrape_record(driver, rec_id, obj_type):
                 time.sleep(1)
         except: pass
 
-        # 2. Expand "Replies"
+        # 2. Logic: "Reply Catch" (Expand Replies)
         try:
             reply_buttons = driver.find_elements(By.XPATH, "//button[contains(., 'Repl')]")
             for btn in reply_buttons:
@@ -132,27 +129,35 @@ def scrape_record(driver, rec_id, obj_type):
                     driver.execute_script("arguments[0].click();", btn)
         except: pass
 
-        time.sleep(2) # Allow JS to render expansion
+        time.sleep(2) # Wait for expansion
 
-        # 3. Parse with BeautifulSoup (Faster & Easier)
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        
-        # Determine cutoff Y position (roughly) to filter future dates
-        # Note: In BS4 we don't have Y-coordinates easily. 
-        # Logic: If we see "Upcoming & Overdue", we skip dates inside that section?
-        # Better approach for Selenium+BS4: Collect all valid dates and filter by Python logic if needed.
-        
+        # 3. Logic: Upcoming & Overdue Filter
+        cutoff_y = 0
+        try:
+            # Find the "Upcoming & Overdue" marker on screen
+            markers = driver.find_elements(By.CSS_SELECTOR, ".slds-timeline__date")
+            if markers:
+                cutoff_y = markers[0].location['y'] # Get Y position
+            else:
+                # Fallback check for text
+                upcoming_text = driver.find_elements(By.XPATH, "//span[contains(text(), 'Upcoming & Overdue')]")
+                if upcoming_text: cutoff_y = 999999
+        except: pass
+
         valid_dates = []
-        
-        # Find all Due Dates
-        date_elements = soup.select('.dueDate')
+        # Find all dates
+        date_elements = driver.find_elements(By.CSS_SELECTOR, ".dueDate")
         
         for el in date_elements:
-            text = el.get_text(strip=True)
+            text = el.text.strip()
+            
+            # Logic: Skip Overdue text
             if 'overdue' in text.lower(): continue
             
-            # Simple check: If inside "Upcoming", usually SF structures it differently. 
-            # For now, let's grab all actual activity dates.
+            # Logic: Upcoming Filter (Check Position)
+            if cutoff_y > 0 and el.location['y'] < cutoff_y:
+                continue # Skip because it's above the cutoff (Future date)
+
             cl = clean_activity_date(text)
             if cl: valid_dates.append(cl)
 
@@ -164,26 +169,22 @@ def scrape_record(driver, rec_id, obj_type):
 
 # ================= MAIN =================
 def main():
-    # 1. Connect API
     sf = get_sf_connection()
     
-    # 2. Start Selenium
+    # Start Browser
     try:
         driver = get_selenium_driver()
-        
-        # 3. Login using Session ID (Magic Trick)
         domain = BASE_URL.split('/')[2]
         frontdoor_url = f"https://{domain}/secur/frontdoor.jsp?sid={sf.session_id}"
         driver.get(frontdoor_url)
-        time.sleep(5) # Wait for redirect
+        time.sleep(5)
         logging.info("Browser Logged in via Session ID")
-        
     except Exception as e:
         logging.error(f"Browser Init Failed: {e}")
         send_email_msg("Browser Error", str(e))
         sys.exit(1)
 
-    # 4. Fetch Data
+    # Queries
     start_dt, end_dt = get_this_week_soql_filter()
     mkt_query = f"SELECT Id FROM Lead WHERE LeadSource = 'Marketing Inbound' AND CreatedDate >= {start_dt} AND CreatedDate <= {end_dt}"
     target_owners = "('Harshit Gupta', 'Abhishek Nayak', 'Deepesh Dubey', 'Prashant Jha')"
@@ -192,12 +193,14 @@ def main():
     try:
         mkt_recs = sf.query_all(mkt_query)['records']
         sales_recs = sf.query_all(sales_query)['records']
-        send_email_msg("Salesforce Bot Started", f"Updating {len(mkt_recs)} Leads and {len(sales_recs)} Accounts.")
+        
+        start_msg = f"🚀 Started updating {len(mkt_recs)} Marketing Leads and {len(sales_recs)} Sales Accounts."
+        send_email_msg("Salesforce Bot Started", start_msg)
     except Exception as e:
         send_email_msg("Error Fetching Data", str(e))
         driver.quit(); sys.exit(1)
 
-    # 5. Process Marketing
+    # Process Marketing
     mkt_success = 0
     logging.info(f"Processing {len(mkt_recs)} Leads...")
     for rec in mkt_recs:
@@ -210,7 +213,7 @@ def main():
             mkt_success += 1
         except: pass
 
-    # 6. Process Sales
+    # Process Sales
     sales_success = 0
     logging.info(f"Processing {len(sales_recs)} Accounts...")
     for rec in sales_recs:
@@ -223,7 +226,8 @@ def main():
         except: pass
 
     driver.quit()
-    send_email_msg("Salesforce Bot Success", f"Updated {mkt_success} Leads and {sales_success} Accounts.")
+    end_msg = f"✅ Update complete: {mkt_success} Leads and {sales_success} Accounts updated successfully."
+    send_email_msg("Salesforce Bot Success", end_msg)
 
 if __name__ == "__main__":
     main()
