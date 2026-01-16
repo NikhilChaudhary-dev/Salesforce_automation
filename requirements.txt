@@ -1,0 +1,3 @@
+pandas
+DrissionPage
+simple-salesforce
