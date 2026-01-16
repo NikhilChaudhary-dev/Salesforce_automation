@@ -1,3 +1,5 @@
 pandas
-DrissionPage
 simple-salesforce
+selenium
+beautifulsoup4
+webdriver-manager
