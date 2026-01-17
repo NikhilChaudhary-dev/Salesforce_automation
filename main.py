@@ -44,40 +44,43 @@ def get_india_date_str():
     ist_now = utc_now + timedelta(hours=5, minutes=30)
     return ist_now.strftime('%d-%b-%Y (IST)')
 
-# ================= HTML EMAIL TEMPLATE =================
+# ================= HTML EMAIL TEMPLATE (PERSONALIZED) =================
 def create_html_body(title, data_rows, footer_note=""):
     rows_html = ""
     for label, value in data_rows:
         rows_html += f"""
         <tr>
-            <td style="padding: 8px; border-bottom: 1px solid #ddd; font-weight: bold; color: #333;">{label}</td>
-            <td style="padding: 8px; border-bottom: 1px solid #ddd; color: #555;">{value}</td>
+            <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; font-weight: bold; color: #333; width: 40%;">{label}</td>
+            <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; color: #555;">{value}</td>
         </tr>
         """
     
     html = f"""
     <html>
-    <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
-        <h2 style="color: #005a9c;">{title}</h2>
-        <p style="font-size: 14px; color: #666;">{get_india_date_str()}</p>
-        
-        <table style="width: 100%; max-width: 600px; border-collapse: collapse; margin-top: 10px; border: 1px solid #ddd;">
-            <tr style="background-color: #f4f4f4;">
-                <th style="text-align: left; padding: 10px; border-bottom: 2px solid #ccc;">Category</th>
-                <th style="text-align: left; padding: 10px; border-bottom: 2px solid #ccc;">Details</th>
-            </tr>
-            {rows_html}
-        </table>
-        
-        <p style="margin-top: 20px; font-style: italic; color: #777;">{footer_note}</p>
-        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-        <p style="font-size: 12px; color: #999;">Automated by Salesforce Bot 🤖</p>
+    <body style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; background-color: #f9f9f9; padding: 20px;">
+        <div style="max-width: 600px; margin: auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+            
+            <h2 style="color: #2c3e50; margin-top: 0; border-bottom: 2px solid #3498db; padding-bottom: 10px;">
+                {title}
+            </h2>
+            <p style="font-size: 14px; color: #7f8c8d; margin-bottom: 20px;">{get_india_date_str()}</p>
+            
+            <table style="width: 100%; border-collapse: collapse;">
+                {rows_html}
+            </table>
+            
+            <p style="margin-top: 25px; font-style: italic; color: #7f8c8d; font-size: 13px;">{footer_note}</p>
+            
+            <div style="margin-top: 30px; border-top: 1px solid #eee; padding-top: 15px; font-size: 12px; color: #999; text-align: center;">
+                Automated by <b>Nikhil Chaudhary</b> ⚡
+            </div>
+        </div>
     </body>
     </html>
     """
     return html
 
-# ================= EMAIL THREADING FUNCTION (WITH CSV SUPPORT) =================
+# ================= EMAIL THREADING FUNCTION =================
 def send_email_thread(subject, html_content, parent_msg_id=None, csv_data=None):
     if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
         logging.warning("Email secrets missing. Skipping notification.")
@@ -89,11 +92,9 @@ def send_email_thread(subject, html_content, parent_msg_id=None, csv_data=None):
         msg['To'] = EMAIL_RECEIVER
         msg['Date'] = formatdate(localtime=True)
         
-        # Unique ID
         new_msg_id = make_msgid()
         msg['Message-ID'] = new_msg_id
 
-        # Threading Logic
         if parent_msg_id:
             msg['Subject'] = f"Re: {subject}"
             msg['In-Reply-To'] = parent_msg_id
@@ -101,20 +102,12 @@ def send_email_thread(subject, html_content, parent_msg_id=None, csv_data=None):
         else:
             msg['Subject'] = subject
 
-        # Set Content
         msg.set_content("Please enable HTML to view this report.")
         msg.add_alternative(html_content, subtype='html')
         
-        # ATTACH CSV IF ERRORS EXIST
         if csv_data:
-            msg.add_attachment(
-                csv_data.encode('utf-8'),
-                maintype='text',
-                subtype='csv',
-                filename='error_report.csv'
-            )
+            msg.add_attachment(csv_data.encode('utf-8'), maintype='text', subtype='csv', filename='error_report.csv')
 
-        # Send
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
             smtp.send_message(msg)
@@ -207,14 +200,11 @@ def scrape_record(driver, rec_id, obj_type):
 
         return len(valid_dates), (valid_dates[0] if valid_dates else None)
     except Exception as e:
-        # Re-raise exception so main loop catches it
         raise e
 
 # ================= MAIN EXECUTION =================
 def main():
     sf = get_sf_connection()
-    
-    # List to store error details for CSV
     failed_records_log = []
 
     # 1. Prepare Queries
@@ -228,17 +218,19 @@ def main():
         sales_recs = sf.query_all(sales_query)['records']
         
         sales_counts = Counter([r['Owner']['Name'] for r in sales_recs])
-        sales_breakdown = "<br>".join([f"&bull; {owner}: <b>{count}</b>" for owner, count in sales_counts.items()])
+        # Nicely formatted bullets for HTML
+        sales_breakdown = "<br>".join([f"• {owner}: <b>{count}</b>" for owner, count in sales_counts.items()])
         
-        # Start Email
-        title = "🚀 Salesforce Update Initiated"
+        # --- TITLE CHANGE HERE ---
+        title = "📊 Salesforce Daily Activity Report"
+        
         data = [
             ("Date", get_india_date_str()),
             ("Marketing Leads Found", f"{len(mkt_recs)} Leads"),
             ("Sales Accounts Found", f"{len(sales_recs)} Accounts"),
             ("Sales Breakdown", sales_breakdown)
         ]
-        html_body = create_html_body(title, data, "The script is running. You will receive a summary upon completion.")
+        html_body = create_html_body(title, data, "The automation script has started. You will receive a summary upon completion.")
         thread_id = send_email_thread(title, html_body)
 
     except Exception as e:
@@ -256,8 +248,6 @@ def main():
 
     # 3. Process Marketing Leads
     mkt_stats = {'updated': 0, 'skipped': 0, 'failed': 0}
-    logging.info(f"Processing {len(mkt_recs)} Marketing Leads...")
-    
     for rec in mkt_recs:
         lid = rec['Id']
         try:
@@ -275,8 +265,6 @@ def main():
 
     # 4. Process Sales Accounts
     sales_stats = {'updated': 0, 'skipped': 0, 'failed': 0}
-    logging.info(f"Processing {len(sales_recs)} Sales Accounts...")
-    
     for rec in sales_recs:
         aid = rec['Id']
         try:
@@ -295,39 +283,37 @@ def main():
 
     driver.quit()
 
-    # --- GENERATE CSV IF ERRORS EXIST ---
+    # --- CSV LOGIC ---
     csv_string = None
-    footer_note = "Note: 'Skipped' records had no valid activity date."
-    
+    footer_note = "Note: 'Skipped' records were checked but had no valid activity date."
     if failed_records_log:
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(['Type', 'Record ID', 'Error Reason']) # Header
+        writer.writerow(['Type', 'Record ID', 'Error Reason'])
         writer.writerows(failed_records_log)
         csv_string = output.getvalue()
-        footer_note += " ⚠️ <b>Errors detected. Please check the attached CSV file.</b>"
+        footer_note += " ⚠️ <b>Errors detected. Please check the attached CSV.</b>"
 
     # --- COMPLETION EMAIL ---
-    end_title = "✅ Update Complete"
+    end_title = "✅ Execution Complete"
     
     mkt_result = (f"<b>{mkt_stats['updated']}</b> Updated<br>"
-                  f"<span style='color:orange;'>{mkt_stats['skipped']} Skipped</span><br>"
-                  f"<span style='color:red;'>{mkt_stats['failed']} Failed</span>")
+                  f"<span style='color:#f39c12;'>{mkt_stats['skipped']} Skipped</span><br>"
+                  f"<span style='color:#c0392b;'>{mkt_stats['failed']} Failed</span>")
     
     sales_result = (f"<b>{sales_stats['updated']}</b> Updated<br>"
-                    f"<span style='color:orange;'>{sales_stats['skipped']} Skipped</span><br>"
-                    f"<span style='color:red;'>{sales_stats['failed']} Failed</span>")
+                    f"<span style='color:#f39c12;'>{sales_stats['skipped']} Skipped</span><br>"
+                    f"<span style='color:#c0392b;'>{sales_stats['failed']} Failed</span>")
 
     end_data = [
         ("Final Status", "Success" if not failed_records_log else "Completed with Errors"),
         ("Marketing Leads", mkt_result),
         ("Sales Accounts", sales_result),
-        ("Total Processed", f"{len(mkt_recs) + len(sales_recs)} Records")
+        ("Total Records Processed", f"{len(mkt_recs) + len(sales_recs)}")
     ]
     
     html_body = create_html_body(end_title, end_data, footer_note)
     
-    # Send email with CSV attachment (if any)
     send_email_thread(title, html_body, parent_msg_id=thread_id, csv_data=csv_string)
 
 if __name__ == "__main__":
