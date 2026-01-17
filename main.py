@@ -226,7 +226,7 @@ def main():
         
         data = [
             ("Date", get_india_date_str()),
-            ("Marketing Leads Found", f"{len(mkt_recs)} Leads"),
+            ("Marketing Inbound Leads Found", f"{len(mkt_recs)} Leads"),
             ("Sales Accounts Found", f"{len(sales_recs)} Accounts"),
             ("Sales Breakdown", sales_breakdown)
         ]
