@@ -38,8 +38,6 @@ SALES_API_DATE = 'Last_Activity_Date_V__c'
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(message)s')
 
 # ================= 🛠️ JAVASCRIPT LOGIC (TEXT WALKER) 🛠️ =================
-# This handles "1 Reply", "2 Replies", "3+ Replies" deep inside Shadow DOM
-
 JS_EXPAND_LOGIC = """
     (function() {
         console.log("🚀 Starting Universal Text Walker...");
@@ -48,10 +46,8 @@ JS_EXPAND_LOGIC = """
             if (!el) return;
             try {
                 el.scrollIntoView({block: 'center'});
-                // Visual marker (only visible if headless=False)
                 el.style.border = "3px solid magenta"; 
                 
-                // Force Click Actions
                 el.click();
                 let eventOpts = {bubbles: true, cancelable: true, view: window};
                 el.dispatchEvent(new MouseEvent('mousedown', eventOpts));
@@ -64,25 +60,19 @@ JS_EXPAND_LOGIC = """
 
         function queryDeep(root) {
             let foundElements = [];
-
-            // TreeWalker: Efficiently find text nodes anywhere
             let walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
             let node;
             
             while (node = walker.nextNode()) {
                 let txt = node.textContent.toLowerCase().trim();
                 
-                // LOGIC: Check for 'reply' OR 'replies' AND ignore 'collapse'
                 if ((txt.includes('reply') || txt.includes('replies')) && !txt.includes('collapse')) {
-                    
-                    // Walk up to find the BUTTON parent
                     let parent = node.parentElement;
                     while (parent && parent.tagName !== 'BUTTON' && parent !== root) {
                         parent = parent.parentElement;
                     }
                     
                     if (parent && parent.tagName === 'BUTTON') {
-                        // Safety Check: Only click if currently closed (aria-pressed="false")
                         let isPressed = parent.getAttribute('aria-pressed');
                         if (isPressed === 'false') {
                             foundElements.push(parent);
@@ -91,7 +81,6 @@ JS_EXPAND_LOGIC = """
                 }
             }
             
-            // Recursion for Shadow DOM
             let all = root.querySelectorAll('*');
             for (let el of all) {
                 if (el.shadowRoot) {
@@ -101,7 +90,6 @@ JS_EXPAND_LOGIC = """
             return foundElements;
         }
 
-        // Execution Loop (Retry logic for 2.5 seconds to catch slow renders)
         let attempts = 0;
         let interval = setInterval(() => {
             attempts++;
@@ -112,7 +100,6 @@ JS_EXPAND_LOGIC = """
                 targets.forEach(btn => triggerClick(btn));
             }
             
-            // Also click standard "View More" / "Show All" buttons just in case
             let others = document.body.querySelectorAll('button');
             others.forEach(btn => {
                 let t = (btn.innerText || "").toLowerCase();
@@ -169,7 +156,12 @@ JS_GET_DATES = """
 def get_india_date_str():
     utc_now = datetime.utcnow()
     ist_now = utc_now + timedelta(hours=5, minutes=30)
-    return ist_now.strftime('%d-%b-%Y (IST)')
+    return ist_now.strftime('%d-%b-%Y') # Clean date for Subject line
+
+def get_india_full_timestamp():
+    utc_now = datetime.utcnow()
+    ist_now = utc_now + timedelta(hours=5, minutes=30)
+    return ist_now.strftime('%d-%b-%Y %I:%M %p (IST)')
 
 def clean_activity_date(text):
     if not text: return ""
@@ -205,7 +197,7 @@ def get_this_week_soql_filter():
     end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
     return start_of_week.strftime('%Y-%m-%dT00:00:00Z'), end_of_week.strftime('%Y-%m-%dT23:59:59Z')
 
-# ================= 📧 YOUR PERSONALIZED HTML TEMPLATE 📧 =================
+# ================= HTML EMAIL TEMPLATE =================
 def create_html_body(title, data_rows, footer_note=""):
     rows_html = ""
     for label, value in data_rows:
@@ -224,7 +216,7 @@ def create_html_body(title, data_rows, footer_note=""):
             <h2 style="color: #2c3e50; margin-top: 0; border-bottom: 2px solid #3498db; padding-bottom: 10px;">
                 {title}
             </h2>
-            <p style="font-size: 14px; color: #7f8c8d; margin-bottom: 20px;">{get_india_date_str()}</p>
+            <p style="font-size: 14px; color: #7f8c8d; margin-bottom: 20px;">{get_india_full_timestamp()}</p>
             
             <table style="width: 100%; border-collapse: collapse;">
                 {rows_html}
@@ -257,10 +249,12 @@ def send_email_thread(subject, html_content, parent_msg_id=None, csv_data=None):
         msg['Message-ID'] = new_msg_id
 
         if parent_msg_id:
+            # REPLY LOGIC: Same Subject + 'Re:', threaded via ID
             msg['Subject'] = f"Re: {subject}"
             msg['In-Reply-To'] = parent_msg_id
             msg['References'] = parent_msg_id
         else:
+            # NEW THREAD LOGIC
             msg['Subject'] = subject
 
         msg.set_content("Please enable HTML to view this report.")
@@ -280,7 +274,7 @@ def send_email_thread(subject, html_content, parent_msg_id=None, csv_data=None):
         logging.error(f"Failed to send email: {e}")
         return None
 
-# ================= CONNECTIONS =================
+# ================= CONNECTIONS & SCRAPING =================
 def get_sf_connection():
     try:
         return Salesforce(username=SF_USERNAME, password=SF_PASSWORD, security_token=SF_TOKEN)
@@ -290,7 +284,6 @@ def get_sf_connection():
 
 def get_selenium_driver():
     chrome_options = Options()
-    # PRODUCTION MODE: Headless enabled
     chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -299,15 +292,12 @@ def get_selenium_driver():
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=chrome_options)
 
-# ================= SCRAPING LOGIC =================
 def scrape_record(driver, rec_id, obj_type):
     url = BASE_URL.format(obj=obj_type, id=rec_id)
     logging.info(f"Scraping {obj_type}: {rec_id}")
     
     try:
         driver.get(url)
-        
-        # 1. WAIT for data load
         time.sleep(10) 
         try:
             WebDriverWait(driver, 15).until(
@@ -315,12 +305,10 @@ def scrape_record(driver, rec_id, obj_type):
             )
         except: pass
 
-        # 2. RUN BRAHMASTRA LOGIC (Expand Threads)
         for i in range(3):
             driver.execute_script(JS_EXPAND_LOGIC)
             time.sleep(3) 
 
-        # 3. EXTRACT DATES
         cutoff_y = driver.execute_script(JS_GET_CUTOFF)
         raw_items = driver.execute_script(JS_GET_DATES)
         
@@ -333,7 +321,6 @@ def scrape_record(driver, rec_id, obj_type):
             
             if not text or 'overdue' in text.lower(): continue
             
-            # Filter Upcoming/Overdue logic
             if cutoff_y > 0 and y_pos < cutoff_y:
                 if (cutoff_y - y_pos) > 10: continue
             
@@ -360,10 +347,8 @@ def main():
     sf = get_sf_connection()
     failed_records_log = []
 
-    # 1. Prepare Queries & Send Start Email
+    # 1. PREPARE & SEND START EMAIL
     start_dt, end_dt = get_this_week_soql_filter()
-    
-    # Update Queries as needed
     mkt_query = f"SELECT Id FROM Lead WHERE LeadSource = 'Marketing Inbound' AND CreatedDate >= {start_dt} AND CreatedDate <= {end_dt}"
     target_owners = "('Harshit Gupta', 'Abhishek Nayak', 'Deepesh Dubey', 'Prashant Jha')"
     sales_query = f"SELECT Id, Owner.Name FROM Account WHERE Owner.Name IN {target_owners}"
@@ -376,21 +361,26 @@ def main():
         sales_counts = Counter([r['Owner']['Name'] for r in sales_recs])
         sales_breakdown = "<br>".join([f"• {owner}: <b>{count}</b>" for owner, count in sales_counts.items()])
         
-        title = "📊 Salesforce Daily Activity Report"
+        # --- 🔴 KEY CHANGE: SUBJECT NOW INCLUDES DATE ---
+        # Isse har naya din ek naya thread banega
+        base_subject = f"📊 Salesforce Daily Activity Report [{get_india_date_str()}]"
+        
         data = [
-            ("Date", get_india_date_str()),
+            ("Date", get_india_full_timestamp()),
             ("Marketing Inbound Leads Found", f"{len(mkt_recs)} Leads"),
             ("Sales Accounts Found", f"{len(sales_recs)} Accounts"),
             ("Sales Breakdown", sales_breakdown)
         ]
-        html_body = create_html_body(title, data, "The automation script has started. You will receive a summary upon completion.")
-        thread_id = send_email_thread(title, html_body)
+        html_body = create_html_body(base_subject, data, "The automation script has started. You will receive a summary upon completion.")
+        
+        # Start the thread with this unique subject
+        thread_id = send_email_thread(base_subject, html_body)
 
     except Exception as e:
         send_email_thread("Script Failed", f"<p>Critical Error: {str(e)}</p>")
         sys.exit(1)
 
-    # 2. Browser Start
+    # 2. PROCESS RECORDS (Browser Logic)
     try:
         driver = get_selenium_driver()
         domain = BASE_URL.split('/')[2]
@@ -400,7 +390,7 @@ def main():
     except Exception as e:
         driver.quit(); sys.exit(1)
 
-    # 3. Process Marketing Leads
+    # MKT LEADS
     mkt_stats = {'updated': 0, 'skipped': 0, 'failed': 0}
     for i, rec in enumerate(mkt_recs):
         lid = rec['Id']
@@ -418,7 +408,7 @@ def main():
             mkt_stats['failed'] += 1
             failed_records_log.append(['Lead', lid, str(e)])
 
-    # 4. Process Sales Accounts
+    # SALES ACCOUNTS
     sales_stats = {'updated': 0, 'skipped': 0, 'failed': 0}
     for i, rec in enumerate(sales_recs):
         aid = rec['Id']
@@ -439,7 +429,7 @@ def main():
 
     driver.quit()
 
-    # --- CSV LOGIC ---
+    # 3. COMPLETION EMAIL (Threaded Reply)
     csv_string = None
     footer_note = "Note: 'Skipped' records were checked but had no valid activity date."
     if failed_records_log:
@@ -450,7 +440,6 @@ def main():
         csv_string = output.getvalue()
         footer_note += " ⚠️ <b>Errors detected. Please check the attached CSV.</b>"
 
-    # --- COMPLETION EMAIL ---
     end_title = "✅ Execution Complete"
     mkt_result = (f"<b>{mkt_stats['updated']}</b> Updated<br>"
                   f"<span style='color:#f39c12;'>{mkt_stats['skipped']} Skipped</span><br>"
@@ -468,7 +457,10 @@ def main():
     ]
     
     html_body = create_html_body(end_title, end_data, footer_note)
-    send_email_thread(title, html_body, parent_msg_id=thread_id, csv_data=csv_string)
+    
+    # Is baar hum 'base_subject' use kar rahe hain jo Start Email mein use kiya tha
+    # Isse ensure hoga ki ye USI thread ka reply bane
+    send_email_thread(base_subject, html_body, parent_msg_id=thread_id, csv_data=csv_string)
 
 if __name__ == "__main__":
     main()
