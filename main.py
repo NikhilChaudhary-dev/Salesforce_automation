@@ -10,7 +10,6 @@ from email.utils import make_msgid, formatdate
 from datetime import datetime, timedelta
 from collections import Counter
 from simple_salesforce import Salesforce
-from bs4 import BeautifulSoup
 
 # Selenium Imports
 from selenium import webdriver
@@ -38,13 +37,175 @@ SALES_API_DATE = 'Last_Activity_Date_V__c'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(message)s')
 
-# ================= HELPER: GET INDIA DATE =================
+# ================= 🛠️ JAVASCRIPT LOGIC (TEXT WALKER) 🛠️ =================
+# This handles "1 Reply", "2 Replies", "3+ Replies" deep inside Shadow DOM
+
+JS_EXPAND_LOGIC = """
+    (function() {
+        console.log("🚀 Starting Universal Text Walker...");
+
+        function triggerClick(el) {
+            if (!el) return;
+            try {
+                el.scrollIntoView({block: 'center'});
+                // Visual marker (only visible if headless=False)
+                el.style.border = "3px solid magenta"; 
+                
+                // Force Click Actions
+                el.click();
+                let eventOpts = {bubbles: true, cancelable: true, view: window};
+                el.dispatchEvent(new MouseEvent('mousedown', eventOpts));
+                el.dispatchEvent(new MouseEvent('mouseup', eventOpts));
+                el.dispatchEvent(new MouseEvent('click', eventOpts));
+                
+                console.log("⚡ Clicked:", el.innerText);
+            } catch(e) { console.error(e); }
+        }
+
+        function queryDeep(root) {
+            let foundElements = [];
+
+            // TreeWalker: Efficiently find text nodes anywhere
+            let walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+            let node;
+            
+            while (node = walker.nextNode()) {
+                let txt = node.textContent.toLowerCase().trim();
+                
+                // LOGIC: Check for 'reply' OR 'replies' AND ignore 'collapse'
+                if ((txt.includes('reply') || txt.includes('replies')) && !txt.includes('collapse')) {
+                    
+                    // Walk up to find the BUTTON parent
+                    let parent = node.parentElement;
+                    while (parent && parent.tagName !== 'BUTTON' && parent !== root) {
+                        parent = parent.parentElement;
+                    }
+                    
+                    if (parent && parent.tagName === 'BUTTON') {
+                        // Safety Check: Only click if currently closed (aria-pressed="false")
+                        let isPressed = parent.getAttribute('aria-pressed');
+                        if (isPressed === 'false') {
+                            foundElements.push(parent);
+                        }
+                    }
+                }
+            }
+            
+            // Recursion for Shadow DOM
+            let all = root.querySelectorAll('*');
+            for (let el of all) {
+                if (el.shadowRoot) {
+                    foundElements = foundElements.concat(queryDeep(el.shadowRoot));
+                }
+            }
+            return foundElements;
+        }
+
+        // Execution Loop (Retry logic for 2.5 seconds to catch slow renders)
+        let attempts = 0;
+        let interval = setInterval(() => {
+            attempts++;
+            let targets = queryDeep(document.body);
+            
+            if (targets.length > 0) {
+                console.log(`🎯 Found ${targets.length} Thread Buttons. Clicking...`);
+                targets.forEach(btn => triggerClick(btn));
+            }
+            
+            // Also click standard "View More" / "Show All" buttons just in case
+            let others = document.body.querySelectorAll('button');
+            others.forEach(btn => {
+                let t = (btn.innerText || "").toLowerCase();
+                if(t.includes('show all') || t.includes('view more') || t.includes('email body')) {
+                     btn.click();
+                }
+            });
+
+            if (attempts >= 5) clearInterval(interval);
+        }, 500);
+    })();
+"""
+
+JS_GET_CUTOFF = """
+    function getCutoff(root) {
+        let markers = Array.from(root.querySelectorAll('.slds-timeline__date'));
+        root.querySelectorAll('*').forEach(el => {
+            if (el.shadowRoot) markers = markers.concat(getCutoff(el.shadowRoot));
+        });
+        return markers;
+    }
+    let all = getCutoff(document.body);
+    all.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+    if(all.length > 0) return all[0].getBoundingClientRect().top + window.scrollY;
+    return 0;
+"""
+
+JS_GET_DATES = """
+    function getDates(root) {
+        let res = [];
+        let sels = ['.dueDate', '.slds-timeline__date', '.email-message-date'];
+        
+        sels.forEach(s => {
+            root.querySelectorAll(s).forEach(el => {
+                let txt = el.innerText ? el.innerText.trim() : "";
+                if(txt.length > 0) {
+                    res.push({
+                        text: txt, 
+                        y: el.getBoundingClientRect().top + window.scrollY
+                    });
+                }
+            });
+        });
+
+        root.querySelectorAll('*').forEach(el => {
+            if (el.shadowRoot) res = res.concat(getDates(el.shadowRoot));
+        });
+        return res;
+    }
+    return getDates(document.body);
+"""
+
+# ================= HELPER FUNCTIONS =================
 def get_india_date_str():
     utc_now = datetime.utcnow()
     ist_now = utc_now + timedelta(hours=5, minutes=30)
     return ist_now.strftime('%d-%b-%Y (IST)')
 
-# ================= HTML EMAIL TEMPLATE (PERSONALIZED) =================
+def clean_activity_date(text):
+    if not text: return ""
+    text = text.split('|')[-1].strip()
+    text_lower = text.lower()
+    now = datetime.now()
+    
+    if 'today' in text_lower: return now.strftime('%d-%b-%Y')
+    elif 'yesterday' in text_lower: return (now - timedelta(days=1)).strftime('%d-%b-%Y')
+    elif 'tomorrow' in text_lower: return (now + timedelta(days=1)).strftime('%d-%b-%Y')
+    if 'overdue' in text_lower: text = text_lower.replace('overdue', '').strip().title()
+
+    try:
+        dt = datetime.strptime(text, '%d-%b-%Y')
+        return dt.strftime('%d-%b-%Y')
+    except ValueError:
+        try:
+            text_with_year = f"{text}-{now.year}"
+            dt = datetime.strptime(text_with_year, '%d-%b-%Y')
+            return dt.strftime('%d-%b-%Y')
+        except ValueError:
+            return None
+
+def convert_date_for_api(date_str):
+    if not date_str: return None
+    try: return datetime.strptime(date_str, '%d-%b-%Y').strftime('%Y-%m-%d')
+    except: return None
+
+def get_this_week_soql_filter():
+    today = datetime.now()
+    start_of_week = today - timedelta(days=today.weekday())
+    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
+    return start_of_week.strftime('%Y-%m-%dT00:00:00Z'), end_of_week.strftime('%Y-%m-%dT23:59:59Z')
+
+# ================= 📧 YOUR PERSONALIZED HTML TEMPLATE 📧 =================
 def create_html_body(title, data_rows, footer_note=""):
     rows_html = ""
     for label, value in data_rows:
@@ -80,7 +241,7 @@ def create_html_body(title, data_rows, footer_note=""):
     """
     return html
 
-# ================= EMAIL THREADING FUNCTION =================
+# ================= EMAIL SENDER =================
 def send_email_thread(subject, html_content, parent_msg_id=None, csv_data=None):
     if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
         logging.warning("Email secrets missing. Skipping notification.")
@@ -119,86 +280,78 @@ def send_email_thread(subject, html_content, parent_msg_id=None, csv_data=None):
         logging.error(f"Failed to send email: {e}")
         return None
 
-# ================= SALESFORCE & BROWSER =================
+# ================= CONNECTIONS =================
 def get_sf_connection():
     try:
-        sf = Salesforce(username=SF_USERNAME, password=SF_PASSWORD, security_token=SF_TOKEN)
-        return sf
+        return Salesforce(username=SF_USERNAME, password=SF_PASSWORD, security_token=SF_TOKEN)
     except Exception as e:
+        logging.error("Salesforce Connection Failed.")
         sys.exit(1)
 
 def get_selenium_driver():
     chrome_options = Options()
+    # PRODUCTION MODE: Headless enabled
     chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    return driver
-
-# ================= UTILS =================
-def get_this_week_soql_filter():
-    today = datetime.now()
-    start_of_week = today - timedelta(days=today.weekday())
-    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
-    return start_of_week.strftime('%Y-%m-%dT00:00:00Z'), end_of_week.strftime('%Y-%m-%dT23:59:59Z')
-
-def clean_activity_date(text):
-    if not text: return ""
-    text = text.split('|')[-1].strip()
-    text_lower = text.lower()
-    now = datetime.now()
-    if 'today' in text_lower: return now.strftime('%d-%b-%Y')
-    elif 'yesterday' in text_lower: return (now - timedelta(days=1)).strftime('%d-%b-%Y')
-    elif 'tomorrow' in text_lower: return (now + timedelta(days=1)).strftime('%d-%b-%Y')
-    if 'overdue' in text_lower: text = text_lower.replace('overdue', '').strip().title()
-    return text
-
-def convert_date_for_api(date_str):
-    if not date_str: return None
-    try: return datetime.strptime(date_str, '%d-%b-%Y').strftime('%Y-%m-%d')
-    except: return None
+    return webdriver.Chrome(service=service, options=chrome_options)
 
 # ================= SCRAPING LOGIC =================
 def scrape_record(driver, rec_id, obj_type):
     url = BASE_URL.format(obj=obj_type, id=rec_id)
+    logging.info(f"Scraping {obj_type}: {rec_id}")
+    
     try:
         driver.get(url)
+        
+        # 1. WAIT for data load
+        time.sleep(10) 
         try:
-            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".slds-timeline__item")))
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".slds-timeline__item, .timelineItem, .dueDate"))
+            )
         except: pass
 
-        try:
-            buttons = driver.find_elements(By.XPATH, "//button[contains(text(), 'Show All') or contains(@class, 'testonly-expandAll')]")
-            for btn in buttons: driver.execute_script("arguments[0].click();", btn); time.sleep(0.5)
-            reply_buttons = driver.find_elements(By.XPATH, "//button[contains(., 'Repl')]")
-            for btn in reply_buttons: 
-                if btn.is_displayed(): driver.execute_script("arguments[0].click();", btn)
-        except: pass
-        time.sleep(1.5)
+        # 2. RUN BRAHMASTRA LOGIC (Expand Threads)
+        for i in range(3):
+            driver.execute_script(JS_EXPAND_LOGIC)
+            time.sleep(3) 
 
-        cutoff_y = 0
-        try:
-            markers = driver.find_elements(By.CSS_SELECTOR, ".slds-timeline__date")
-            if markers: cutoff_y = markers[0].location['y']
-            else:
-                upcoming_text = driver.find_elements(By.XPATH, "//span[contains(text(), 'Upcoming & Overdue')]")
-                if upcoming_text: cutoff_y = 999999
-        except: pass
-
+        # 3. EXTRACT DATES
+        cutoff_y = driver.execute_script(JS_GET_CUTOFF)
+        raw_items = driver.execute_script(JS_GET_DATES)
+        
         valid_dates = []
-        date_elements = driver.find_elements(By.CSS_SELECTOR, ".dueDate")
-        for el in date_elements:
-            text = el.text.strip()
-            if 'overdue' in text.lower(): continue
-            if cutoff_y > 0 and el.location['y'] < cutoff_y: continue
-            cl = clean_activity_date(text)
-            if cl: valid_dates.append(cl)
+        unique_timestamps = set()
 
-        return len(valid_dates), (valid_dates[0] if valid_dates else None)
+        for item in raw_items:
+            text = item['text'].strip()
+            y_pos = item['y']
+            
+            if not text or 'overdue' in text.lower(): continue
+            
+            # Filter Upcoming/Overdue logic
+            if cutoff_y > 0 and y_pos < cutoff_y:
+                if (cutoff_y - y_pos) > 10: continue
+            
+            if text in unique_timestamps: continue
+
+            cl = clean_activity_date(text)
+            if cl:
+                valid_dates.append(cl)
+                unique_timestamps.add(text)
+
+        if valid_dates:
+             date_objs = [datetime.strptime(d, '%d-%b-%Y') for d in valid_dates]
+             date_objs.sort(reverse=True)
+             latest_date_str = date_objs[0].strftime('%d-%b-%Y')
+             return len(valid_dates), latest_date_str
+
+        return 0, None
+
     except Exception as e:
         raise e
 
@@ -207,23 +360,23 @@ def main():
     sf = get_sf_connection()
     failed_records_log = []
 
-    # 1. Prepare Queries
+    # 1. Prepare Queries & Send Start Email
     start_dt, end_dt = get_this_week_soql_filter()
+    
+    # Update Queries as needed
     mkt_query = f"SELECT Id FROM Lead WHERE LeadSource = 'Marketing Inbound' AND CreatedDate >= {start_dt} AND CreatedDate <= {end_dt}"
     target_owners = "('Harshit Gupta', 'Abhishek Nayak', 'Deepesh Dubey', 'Prashant Jha')"
     sales_query = f"SELECT Id, Owner.Name FROM Account WHERE Owner.Name IN {target_owners}"
 
     try:
+        logging.info("Querying Salesforce...")
         mkt_recs = sf.query_all(mkt_query)['records']
         sales_recs = sf.query_all(sales_query)['records']
         
         sales_counts = Counter([r['Owner']['Name'] for r in sales_recs])
-        # Nicely formatted bullets for HTML
         sales_breakdown = "<br>".join([f"• {owner}: <b>{count}</b>" for owner, count in sales_counts.items()])
         
-        # --- TITLE CHANGE HERE ---
         title = "📊 Salesforce Daily Activity Report"
-        
         data = [
             ("Date", get_india_date_str()),
             ("Marketing Inbound Leads Found", f"{len(mkt_recs)} Leads"),
@@ -242,14 +395,16 @@ def main():
         driver = get_selenium_driver()
         domain = BASE_URL.split('/')[2]
         driver.get(f"https://{domain}/secur/frontdoor.jsp?sid={sf.session_id}")
+        logging.info("Browser authenticated.")
         time.sleep(5)
     except Exception as e:
         driver.quit(); sys.exit(1)
 
     # 3. Process Marketing Leads
     mkt_stats = {'updated': 0, 'skipped': 0, 'failed': 0}
-    for rec in mkt_recs:
+    for i, rec in enumerate(mkt_recs):
         lid = rec['Id']
+        logging.info(f"Processing Lead {i+1}/{len(mkt_recs)}: {lid}")
         try:
             count, last_date = scrape_record(driver, lid, 'Lead')
             if last_date:
@@ -265,8 +420,9 @@ def main():
 
     # 4. Process Sales Accounts
     sales_stats = {'updated': 0, 'skipped': 0, 'failed': 0}
-    for rec in sales_recs:
+    for i, rec in enumerate(sales_recs):
         aid = rec['Id']
+        logging.info(f"Processing Account {i+1}/{len(sales_recs)}: {aid}")
         try:
             count, last_date = scrape_record(driver, aid, 'Account')
             if last_date:
@@ -296,7 +452,6 @@ def main():
 
     # --- COMPLETION EMAIL ---
     end_title = "✅ Execution Complete"
-    
     mkt_result = (f"<b>{mkt_stats['updated']}</b> Updated<br>"
                   f"<span style='color:#f39c12;'>{mkt_stats['skipped']} Skipped</span><br>"
                   f"<span style='color:#c0392b;'>{mkt_stats['failed']} Failed</span>")
@@ -313,7 +468,6 @@ def main():
     ]
     
     html_body = create_html_body(end_title, end_data, footer_note)
-    
     send_email_thread(title, html_body, parent_msg_id=thread_id, csv_data=csv_string)
 
 if __name__ == "__main__":
