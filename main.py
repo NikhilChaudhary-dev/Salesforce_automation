@@ -156,7 +156,7 @@ JS_GET_DATES = """
 def get_india_date_str():
     utc_now = datetime.utcnow()
     ist_now = utc_now + timedelta(hours=5, minutes=30)
-    return ist_now.strftime('%d-%b-%Y') # Clean date for Subject line
+    return ist_now.strftime('%d-%b-%Y')
 
 def get_india_full_timestamp():
     utc_now = datetime.utcnow()
@@ -190,12 +190,18 @@ def convert_date_for_api(date_str):
     try: return datetime.strptime(date_str, '%d-%b-%Y').strftime('%Y-%m-%d')
     except: return None
 
-def get_this_week_soql_filter():
+# --- NEW 30-DAY LOOKBACK FILTER ---
+def get_lookback_soql_filter(days=30):
     today = datetime.now()
-    start_of_week = today - timedelta(days=today.weekday())
-    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
-    return start_of_week.strftime('%Y-%m-%dT00:00:00Z'), end_of_week.strftime('%Y-%m-%dT23:59:59Z')
+    start_date = today - timedelta(days=days)
+    
+    # Start from X days ago at 00:00:00
+    start_dt = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Until Today at 23:59:59
+    end_dt = today.replace(hour=23, minute=59, second=59, microsecond=0)
+    
+    return start_dt.strftime('%Y-%m-%dT00:00:00Z'), end_dt.strftime('%Y-%m-%dT23:59:59Z')
 
 # ================= HTML EMAIL TEMPLATE =================
 def create_html_body(title, data_rows, footer_note=""):
@@ -249,12 +255,10 @@ def send_email_thread(subject, html_content, parent_msg_id=None, csv_data=None):
         msg['Message-ID'] = new_msg_id
 
         if parent_msg_id:
-            # REPLY LOGIC: Same Subject + 'Re:', threaded via ID
             msg['Subject'] = f"Re: {subject}"
             msg['In-Reply-To'] = parent_msg_id
             msg['References'] = parent_msg_id
         else:
-            # NEW THREAD LOGIC
             msg['Subject'] = subject
 
         msg.set_content("Please enable HTML to view this report.")
@@ -348,7 +352,9 @@ def main():
     failed_records_log = []
 
     # 1. PREPARE & SEND START EMAIL
-    start_dt, end_dt = get_this_week_soql_filter()
+    # --- CHANGED: Lookback 30 Days instead of This Week ---
+    start_dt, end_dt = get_lookback_soql_filter(days=30)
+    
     mkt_query = f"SELECT Id FROM Lead WHERE LeadSource = 'Marketing Inbound' AND CreatedDate >= {start_dt} AND CreatedDate <= {end_dt}"
     target_owners = "('Harshit Gupta', 'Abhishek Nayak', 'Deepesh Dubey', 'Prashant Jha')"
     sales_query = f"SELECT Id, Owner.Name FROM Account WHERE Owner.Name IN {target_owners}"
@@ -361,19 +367,16 @@ def main():
         sales_counts = Counter([r['Owner']['Name'] for r in sales_recs])
         sales_breakdown = "<br>".join([f"• {owner}: <b>{count}</b>" for owner, count in sales_counts.items()])
         
-        # --- 🔴 KEY CHANGE: SUBJECT NOW INCLUDES DATE ---
-        # Isse har naya din ek naya thread banega
         base_subject = f"📊 Salesforce Daily Activity Report [{get_india_date_str()}]"
         
         data = [
             ("Date", get_india_full_timestamp()),
-            ("Marketing Inbound Leads Found", f"{len(mkt_recs)} Leads"),
+            ("Marketing Inbound Leads Found", f"{len(mkt_recs)} Leads (Last 30 Days)"),
             ("Sales Accounts Found", f"{len(sales_recs)} Accounts"),
             ("Sales Breakdown", sales_breakdown)
         ]
         html_body = create_html_body(base_subject, data, "The automation script has started. You will receive a summary upon completion.")
         
-        # Start the thread with this unique subject
         thread_id = send_email_thread(base_subject, html_body)
 
     except Exception as e:
@@ -458,8 +461,6 @@ def main():
     
     html_body = create_html_body(end_title, end_data, footer_note)
     
-    # Is baar hum 'base_subject' use kar rahe hain jo Start Email mein use kiya tha
-    # Isse ensure hoga ki ye USI thread ka reply bane
     send_email_thread(base_subject, html_body, parent_msg_id=thread_id, csv_data=csv_string)
 
 if __name__ == "__main__":
