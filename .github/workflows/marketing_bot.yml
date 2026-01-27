@@ -1,0 +1,35 @@
+name: Marketing Bot (Manual Trigger Only)
+
+on:
+  workflow_dispatch:      # Manual button to run
+  # schedule:
+  #   - cron: '30 23 * * *' # Uncomment this to enable daily at 05:00 AM IST
+
+jobs:
+  run-marketing-scraper:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Chrome & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          pip install simple-salesforce selenium webdriver-manager
+
+      - name: Run Marketing Bot
+        env:
+          SF_USERNAME: ${{ secrets.SF_USERNAME }}
+          SF_PASSWORD: ${{ secrets.SF_PASSWORD }}
+          SF_TOKEN: ${{ secrets.SF_TOKEN }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+        run: python marketing_bot.py
