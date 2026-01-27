@@ -1,1 +1,36 @@
+name: Salesforce Sales Bot (Accounts Only)
 
+on:
+  workflow_dispatch:      # Manual trigger button ke liye
+  schedule:
+    - cron: '30 23 * * *' # Roz Subah 05:00 AM IST (11:30 PM UTC)
+
+jobs:
+  run-sales-scraper:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Chrome & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          pip install simple-salesforce selenium webdriver-manager
+
+      - name: Run Sales Bot
+        env:
+          # Inhe GitHub Settings > Secrets > Actions mein add zaroor karna
+          SF_USERNAME: ${{ secrets.SF_USERNAME }}
+          SF_PASSWORD: ${{ secrets.SF_PASSWORD }}
+          SF_TOKEN: ${{ secrets.SF_TOKEN }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+        run: python sales_bot.py
