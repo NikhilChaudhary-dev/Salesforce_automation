@@ -1,21 +1,16 @@
 name: Sales Bot Execution
 
 on:
-  workflow_dispatch:      # Isse GitHub par "Run workflow" ka button mil jayega
+  workflow_dispatch:
   schedule:
-    - cron: '30 23 * * *' # Roz Subah 05:00 AM IST (11:30 PM UTC) par apne aap chalega
+    - cron: '30 23 * * *'
 
 jobs:
   run-sales:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
-
-      # Yeh step check karega ki file sahi jagah par hai ya nahi
-      - name: List Files (Debug)
-        run: ls -R
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -36,4 +31,5 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
-        run: python sales_bot.py
+        # Yahan humne file ka sahi naam 'main.py' likh diya hai
+        run: python main.py
