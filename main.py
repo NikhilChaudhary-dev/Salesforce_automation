@@ -2,6 +2,7 @@ import os, sys, time, logging, smtplib, csv, io
 from email.message import EmailMessage
 from email.utils import make_msgid, formatdate
 from datetime import datetime, timedelta
+from collections import Counter
 from simple_salesforce import Salesforce
 
 # Selenium Imports
@@ -28,9 +29,10 @@ SALES_API_DATE = 'Last_Activity_Date_V__c'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(message)s')
 
-# ================= 🛠️ JAVASCRIPT LOGIC 🛠️ =================
+# ================= 🛠️ JAVASCRIPT LOGIC (TEXT WALKER) 🛠️ =================
 JS_EXPAND_LOGIC = """
     (function() {
+        console.log("🚀 Starting Universal Text Walker...");
         function triggerClick(el) {
             if (!el) return;
             try {
@@ -40,6 +42,7 @@ JS_EXPAND_LOGIC = """
                 el.dispatchEvent(new MouseEvent('mousedown', eventOpts));
                 el.dispatchEvent(new MouseEvent('mouseup', eventOpts));
                 el.dispatchEvent(new MouseEvent('click', eventOpts));
+                console.log("⚡ Clicked:", el.innerText);
             } catch(e) { console.error(e); }
         }
 
@@ -115,11 +118,9 @@ def clean_activity_date(text):
     text = text.split('|')[-1].strip()
     text_lower = text.lower()
     now = datetime.now()
-    
     if 'today' in text_lower: return now.strftime('%d-%b-%Y')
     elif 'yesterday' in text_lower: return (now - timedelta(days=1)).strftime('%d-%b-%Y')
     if 'overdue' in text_lower: text = text_lower.replace('overdue', '').strip().title()
-
     for fmt in ('%d-%b-%Y', '%d-%b'):
         try:
             dt = datetime.strptime(text, fmt)
@@ -133,9 +134,28 @@ def convert_date_for_api(date_str):
     try: return datetime.strptime(date_str, '%d-%b-%Y').strftime('%Y-%m-%d')
     except: return None
 
+# ================= 🎨 2nd SCREENSHOT STYLE TEMPLATE 🎨 =================
 def create_html_body(title, data_rows, footer_note=""):
-    rows_html = "".join([f"<tr><td style='padding:12px;border-bottom:1px solid #e0e0e0;font-weight:bold;width:40%;'>{l}</td><td style='padding:12px;border-bottom:1px solid #e0e0e0;'>{v}</td></tr>" for l, v in data_rows])
-    return f"<html><body style='font-family:Segoe UI,Arial;padding:20px;'><div style='max-width:600px;margin:auto;border:1px solid #ddd;padding:25px;'><h2>{title}</h2><table style='width:100%;border-collapse:collapse;'>{rows_html}</table><p style='color:#777;font-size:12px;'>{footer_note}</p></div></body></html>"
+    rows_html = "".join([f"""
+        <tr>
+            <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; font-weight: bold; color: #333; width: 40%;">{l}</td>
+            <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; color: #555;">{v}</td>
+        </tr>""" for l, v in data_rows])
+    
+    return f"""
+    <html>
+    <body style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; background-color: #f9f9f9; padding: 20px;">
+        <div style="max-width: 600px; margin: auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+            <h2 style="color: #2c3e50; margin-top: 0; border-bottom: 2px solid #3498db; padding-bottom: 10px;">📊 {title}</h2>
+            <p style="font-size: 14px; color: #7f8c8d; margin-bottom: 20px;">{get_india_full_timestamp()}</p>
+            <table style="width: 100%; border-collapse: collapse;">{rows_html}</table>
+            <p style="margin-top: 25px; font-style: italic; color: #7f8c8d; font-size: 13px;">{footer_note}</p>
+            <div style="margin-top: 30px; border-top: 1px solid #eee; padding-top: 15px; font-size: 12px; color: #999; text-align: center;">
+                Automated by <b>Nikhil Chaudhary</b> ⚡
+            </div>
+        </div>
+    </body>
+    </html>"""
 
 def send_email_report(subject, html, parent_msg_id=None, csv_data=None):
     if not EMAIL_SENDER: return None
@@ -149,7 +169,7 @@ def send_email_report(subject, html, parent_msg_id=None, csv_data=None):
         smtp.send_message(msg)
     return msg['Message-ID']
 
-# ================= SCRAPING LOGIC =================
+# ================= SCRAPING & MAIN =================
 def scrape_record(driver, rec_id, obj_type):
     url = BASE_URL.format(obj=obj_type, id=rec_id)
     driver.get(url)
@@ -157,21 +177,13 @@ def scrape_record(driver, rec_id, obj_type):
     for _ in range(3):
         driver.execute_script(JS_EXPAND_LOGIC)
         time.sleep(3)
-    
     cutoff_y = driver.execute_script(JS_GET_CUTOFF)
     raw_items = driver.execute_script(JS_GET_DATES)
-    
-    valid_dates = []
-    for item in raw_items:
-        if cutoff_y > 0 and item['y'] < (cutoff_y - 10): continue
-        cl = clean_activity_date(item['text'])
-        if cl: valid_dates.append(cl)
-    
+    valid_dates = [clean_activity_date(i['text']) for i in raw_items if (cutoff_y == 0 or i['y'] >= (cutoff_y - 10)) and clean_activity_date(i['text'])]
     if not valid_dates: return 0, None
     valid_dates.sort(key=lambda x: datetime.strptime(x, '%d-%b-%Y'), reverse=True)
     return len(set(valid_dates)), valid_dates[0]
 
-# ================= MAIN EXECUTION =================
 def main():
     try:
         sf = Salesforce(username=SF_USERNAME, password=SF_PASSWORD, security_token=SF_TOKEN)
@@ -179,17 +191,22 @@ def main():
         logging.error(f"SF Connection Failed: {e}"); sys.exit(1)
 
     target_owners = "('Harshit Gupta', 'Abhishek Nayak', 'Deepesh Dubey', 'Prashant Jha')"
-    sales_query = f"SELECT Id, Owner.Name FROM Account WHERE Owner.Name IN {target_owners}"
-    sales_recs = sf.query_all(sales_query)['records']
+    sales_recs = sf.query_all(f"SELECT Id, Owner.Name FROM Account WHERE Owner.Name IN {target_owners}")['records']
     
-    base_subject = f"📊 Sales Account Activity Report [{get_india_date_str()}]"
-    thread_id = send_email_report(base_subject, create_html_body(base_subject, [("Total Accounts Found", len(sales_recs))], "Script is now processing accounts..."))
+    # Generate Sales Breakdown Text
+    counts = Counter([r['Owner']['Name'] for r in sales_recs])
+    breakdown = "".join([f"• {owner}: <b>{count}</b><br>" for owner, count in counts.items()])
+    
+    base_subject = f"Sales Account Activity Report [{get_india_date_str()}]"
+    data = [
+        ("Date", get_india_full_timestamp()),
+        ("Sales Accounts Found", f"{len(sales_recs)} Accounts"),
+        ("Sales Breakdown", breakdown)
+    ]
+    
+    thread_id = send_email_report(base_subject, create_html_body(base_subject, data, "The automation script has started. You will receive a summary upon completion."))
 
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-    
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=Options().add_argument("--headless=new"))
     driver.get(f"https://loop-subscriptions.lightning.force.com/secur/frontdoor.jsp?sid={sf.session_id}")
     time.sleep(5)
 
@@ -197,21 +214,18 @@ def main():
     failed_log = []
 
     for i, rec in enumerate(sales_recs):
-        aid = rec['Id']
-        logging.info(f"Processing Account {i+1}/{len(sales_recs)}: {aid}")
         try:
-            count, last_date = scrape_record(driver, aid, 'Account')
+            count, last_date = scrape_record(driver, rec['Id'], 'Account')
             if last_date:
-                if api_date := convert_date_for_api(last_date):
-                    sf.Account.update(aid, {SALES_API_DATE: api_date})
-                    stats['updated'] += 1
+                sf.Account.update(rec['Id'], {SALES_API_DATE: convert_date_for_api(last_date)})
+                stats['updated'] += 1
         except Exception as e:
             stats['failed'] += 1
-            failed_log.append(['Account', aid, str(e)])
+            failed_log.append(['Account', rec['Id'], str(e)])
 
     driver.quit()
-
-    # Final Email
+    
+    # Final CSV Preparation for errors
     csv_str = None
     if failed_log:
         output = io.StringIO()
