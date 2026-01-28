@@ -206,7 +206,16 @@ def main():
     
     thread_id = send_email_report(base_subject, create_html_body(base_subject, data, "The automation script has started. You will receive a summary upon completion."))
 
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=Options().add_argument("--headless=new"))
+    # --- 🛠️ 27-Jan FIXED BROWSER OPTIONS 🛠️ ---
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    
     driver.get(f"https://loop-subscriptions.lightning.force.com/secur/frontdoor.jsp?sid={sf.session_id}")
     time.sleep(5)
 
