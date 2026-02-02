@@ -24,7 +24,7 @@ BASE_URL = 'https://loop-subscriptions.lightning.force.com/lightning/r/{obj}/{id
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(message)s')
 
-# GLOBAL VARIABLE FOR DRIVER PATH
+# GLOBAL DRIVER PATH TO FIX EOF ERROR
 GLOBAL_DRIVER_PATH = None
 
 # ================= 🛠️ JAVASCRIPT LOGIC 🛠️ =================
@@ -99,7 +99,7 @@ def send_email_report(subject, html, parent_msg_id=None, csv_data=None):
     msg = EmailMessage()
     msg['From'], msg['To'], msg['Subject'], msg['Date'] = EMAIL_SENDER, EMAIL_RECEIVER, subject, formatdate(localtime=True)
     msg.add_alternative(html, subtype='html')
-    if csv_data: msg.add_attachment(csv_data.encode('utf-8'), maintype='text', subtype='csv', filename=f'Activity_Report_{datetime.now().strftime("%m_%d_%Y")}.csv')
+    if csv_data: msg.add_attachment(csv_data.encode('utf-8'), maintype='text', subtype='csv', filename=f'App_Install_Report_{datetime.now().strftime("%m_%d_%Y")}.csv')
     if parent_msg_id: msg['In-Reply-To'] = msg['References'] = parent_msg_id
     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
         smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
@@ -111,14 +111,12 @@ def process_worker(lead_info, session_id):
     global GLOBAL_DRIVER_PATH
     lid = lead_info['Id']
     email = lead_info.get('Email', 'N/A')
-    
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     
-    # 🛠️ FIX: Using pre-installed driver path
     driver = webdriver.Chrome(service=Service(GLOBAL_DRIVER_PATH), options=opts)
     
     report_data = {"Lead ID": lid, "Email": email, "Has Activity": "No", "Activity Count": 0, "First Activity Date": "N/A", "Latest Activity Date": "N/A"}
@@ -147,23 +145,23 @@ def main():
     except Exception as e:
         logging.error(f"SF Connection Failed: {e}"); sys.exit(1)
 
-    # 🛠️ FIX: Install driver ONCE before threads start
+    # 🛠️ FIX: Pre-install driver once to avoid EOF Error
     logging.info("Initializing WebDriver...")
     GLOBAL_DRIVER_PATH = ChromeDriverManager().install()
 
-    # 🛠️ QUERY: Get ALL Leads from last 30 days (Removed Exclusion Filter)
-    query = "SELECT Id, Email FROM Lead WHERE CreatedDate >= LAST_N_DAYS:30 LIMIT 1500"
+    # 🛠️ QUERY FIX: Only App Install leads (Matches your 830 count)
+    query = "SELECT Id, Email FROM Lead WHERE Sub_Source__c = 'App Install' AND CreatedDate >= LAST_N_DAYS:30 LIMIT 1000"
     recs = sf.query_all(query)['records']
     
-    title = f"Activity Extraction Report (All Leads) [{get_india_date_str()}]"
+    title = f"App Install Activity Report [{get_india_date_str()}]"
     start_info = [
         ("Total Leads (Last 30 Days)", len(recs)), 
-        ("Filter Applied", "All Leads (Including App Install)"), 
+        ("Filter Applied", "Sub_Source == 'App Install'"), 
         ("Parallel Workers", "5 Browsers"),
-        ("Execution Mode", "Multi-threaded (English Format)")
+        ("Execution Mode", "Multi-threaded (English)")
     ]
     
-    thread_id = send_email_report(title, create_html_body(title, start_info, "Data extraction has started for all leads matching criteria."))
+    thread_id = send_email_report(title, create_html_body(title, start_info, "Extracting data for App Install leads only."))
 
     final_report = []
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -176,6 +174,6 @@ def main():
     writer.writerows(final_report)
 
     summary_info = [("Total Processed", len(recs)), ("Data Format", "MM/DD/YYYY"), ("Status", "Completed")]
-    send_email_report(title, create_html_body("✅ Activity Report Ready", summary_info, "Please find the attached CSV with detailed activity data."), parent_msg_id=thread_id, csv_data=output.getvalue())
+    send_email_report(title, create_html_body("✅ App Install Extraction Complete", summary_info, "CSV attached."), parent_msg_id=thread_id, csv_data=output.getvalue())
 
 if __name__ == "__main__": main()
