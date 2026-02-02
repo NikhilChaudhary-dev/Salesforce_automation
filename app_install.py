@@ -24,6 +24,9 @@ BASE_URL = 'https://loop-subscriptions.lightning.force.com/lightning/r/{obj}/{id
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(message)s')
 
+# GLOBAL VARIABLE FOR DRIVER PATH
+GLOBAL_DRIVER_PATH = None
+
 # ================= 🛠️ JAVASCRIPT LOGIC 🛠️ =================
 JS_EXPAND_LOGIC = """
     (function() {
@@ -96,7 +99,7 @@ def send_email_report(subject, html, parent_msg_id=None, csv_data=None):
     msg = EmailMessage()
     msg['From'], msg['To'], msg['Subject'], msg['Date'] = EMAIL_SENDER, EMAIL_RECEIVER, subject, formatdate(localtime=True)
     msg.add_alternative(html, subtype='html')
-    if csv_data: msg.add_attachment(csv_data.encode('utf-8'), maintype='text', subtype='csv', filename=f'Marketing_Report_{datetime.now().strftime("%m_%d_%Y")}.csv')
+    if csv_data: msg.add_attachment(csv_data.encode('utf-8'), maintype='text', subtype='csv', filename=f'Activity_Report_{datetime.now().strftime("%m_%d_%Y")}.csv')
     if parent_msg_id: msg['In-Reply-To'] = msg['References'] = parent_msg_id
     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
         smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
@@ -105,13 +108,18 @@ def send_email_report(subject, html, parent_msg_id=None, csv_data=None):
 
 # ================= WORKER =================
 def process_worker(lead_info, session_id):
+    global GLOBAL_DRIVER_PATH
     lid = lead_info['Id']
     email = lead_info.get('Email', 'N/A')
+    
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+    opts.add_argument("--disable-gpu")
+    
+    # 🛠️ FIX: Using pre-installed driver path to avoid conflict
+    driver = webdriver.Chrome(service=Service(GLOBAL_DRIVER_PATH), options=opts)
     
     report_data = {"Lead ID": lid, "Email": email, "Has Activity": "No", "Activity Count": 0, "First Activity Date": "N/A", "Latest Activity Date": "N/A"}
     try:
@@ -133,14 +141,29 @@ def process_worker(lead_info, session_id):
 
 # ================= MAIN =================
 def main():
-    sf = Salesforce(username=SF_USERNAME, password=SF_PASSWORD, security_token=SF_TOKEN)
-    query = "SELECT Id, Email FROM Lead WHERE LeadSource = 'Marketing Inbound' AND Sub_Source__c != 'App Install' AND CreatedDate >= LAST_N_DAYS:30 LIMIT 1000"
+    global GLOBAL_DRIVER_PATH
+    try:
+        sf = Salesforce(username=SF_USERNAME, password=SF_PASSWORD, security_token=SF_TOKEN)
+    except Exception as e:
+        logging.error(f"SF Connection Failed: {e}"); sys.exit(1)
+
+    # 🛠️ FIX: Install driver ONCE before starting threads
+    logging.info("Initializing WebDriver...")
+    GLOBAL_DRIVER_PATH = ChromeDriverManager().install()
+
+    # 🛠️ GLOBAL FILTER: Any Lead (not just Marketing) where Sub_Source is not App Install
+    query = "SELECT Id, Email FROM Lead WHERE Sub_Source__c != 'App Install' AND CreatedDate >= LAST_N_DAYS:30 LIMIT 1000"
     recs = sf.query_all(query)['records']
     
-    title = f"Marketing Activity Extraction Report [{get_india_date_str()}]"
-    start_info = [("Total Leads Found (Last 30)", len(recs)), ("Exclusion Filter", "Sub-Source != 'App Install'"), ("Parallel Workers", "5 Browsers (Concurrent)"), ("Execution Mode", "Multi-threaded (Fast)")]
+    title = f"Activity Extraction Report (Global Leads) [{get_india_date_str()}]"
+    start_info = [
+        ("Total Leads (Last 30 Days)", len(recs)), 
+        ("Filter Applied", "Sub_Source != 'App Install'"), 
+        ("Parallel Workers", "5 Browsers"),
+        ("Execution Mode", "Multi-threaded (English Format)")
+    ]
     
-    thread_id = send_email_report(title, create_html_body(title, start_info, "Bot has started extracting data. You will receive the final CSV once complete."))
+    thread_id = send_email_report(title, create_html_body(title, start_info, "Data extraction has started for all leads matching criteria."))
 
     final_report = []
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -152,7 +175,7 @@ def main():
     writer.writeheader()
     writer.writerows(final_report)
 
-    summary_info = [("Total Processed", len(recs)), ("Data Format", "MM/DD/YYYY"), ("Status", "Completed Successfully")]
-    send_email_report(title, create_html_body("✅ Activity Extraction Complete", summary_info, "The detailed CSV report is attached to this email."), parent_msg_id=thread_id, csv_data=output.getvalue())
+    summary_info = [("Total Processed", len(recs)), ("Data Format", "MM/DD/YYYY"), ("Status", "Completed")]
+    send_email_report(title, create_html_body("✅ Activity Report Ready", summary_info, "Please find the attached CSV with detailed activity data."), parent_msg_id=thread_id, csv_data=output.getvalue())
 
 if __name__ == "__main__": main()
