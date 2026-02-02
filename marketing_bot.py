@@ -2,6 +2,7 @@ import os, sys, time, logging, smtplib, csv, io
 from email.message import EmailMessage
 from email.utils import make_msgid, formatdate
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor # Speed ke liye
 from simple_salesforce import Salesforce
 
 # Selenium Imports
@@ -152,27 +153,45 @@ def send_email_report(subject, html, parent_msg_id=None, csv_data=None):
     msg = EmailMessage()
     msg['From'], msg['To'], msg['Subject'], msg['Date'] = EMAIL_SENDER, EMAIL_RECEIVER, subject, formatdate(localtime=True)
     msg.add_alternative(html, subtype='html')
-    if csv_data: msg.add_attachment(csv_data.encode('utf-8'), maintype='text', subtype='csv', filename='mkt_errors.csv')
+    if csv_data: msg.add_attachment(csv_data.encode('utf-8'), maintype='text', subtype='csv', filename='mkt_report_details.csv')
     if parent_msg_id: msg['In-Reply-To'] = msg['References'] = parent_msg_id
     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
         smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
         smtp.send_message(msg)
     return msg['Message-ID']
 
-# ================= SCRAPING LOGIC =================
-def scrape_record(driver, rec_id, obj_type):
-    url = BASE_URL.format(obj=obj_type, id=rec_id)
-    driver.get(url)
-    time.sleep(10)
-    for _ in range(3):
-        driver.execute_script(JS_EXPAND_LOGIC)
-        time.sleep(3)
-    cutoff_y = driver.execute_script(JS_GET_CUTOFF)
-    raw_items = driver.execute_script(JS_GET_DATES)
-    valid_dates = [clean_activity_date(i['text']) for i in raw_items if (cutoff_y == 0 or i['y'] >= (cutoff_y - 10)) and clean_activity_date(i['text'])]
-    if not valid_dates: return 0, None
-    valid_dates.sort(key=lambda x: datetime.strptime(x, '%d-%b-%Y'), reverse=True)
-    return len(set(valid_dates)), valid_dates[0]
+# ================= WORKER FOR THREADING =================
+def process_lead_worker(lid, session_id):
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    
+    try:
+        # Salesforce Frontdoor Login
+        driver.get(f"https://loop-subscriptions.lightning.force.com/secur/frontdoor.jsp?sid={session_id}")
+        time.sleep(5)
+        
+        url = BASE_URL.format(obj='Lead', id=lid)
+        driver.get(url)
+        time.sleep(10)
+        
+        for _ in range(3):
+            driver.execute_script(JS_EXPAND_LOGIC)
+            time.sleep(3)
+            
+        cutoff_y = driver.execute_script(JS_GET_CUTOFF)
+        raw_items = driver.execute_script(JS_GET_DATES)
+        valid_dates = [clean_activity_date(i['text']) for i in raw_items if (cutoff_y == 0 or i['y'] >= (cutoff_y - 10)) and clean_activity_date(i['text'])]
+        
+        if not valid_dates: return lid, 0, None, None
+        valid_dates.sort(key=lambda x: datetime.strptime(x, '%d-%b-%Y'), reverse=True)
+        return lid, len(set(valid_dates)), valid_dates[0], None
+    except Exception as e:
+        return lid, 0, None, str(e)
+    finally:
+        driver.quit()
 
 # ================= MAIN EXECUTION =================
 def main():
@@ -181,55 +200,52 @@ def main():
     except Exception as e:
         logging.error(f"SF Connection Failed: {e}"); sys.exit(1)
 
-    # Original 30-Day Lookback Filter
+    # 30-Day Filter + Batch Limit of 150 to avoid GitHub Timeout
     start_dt = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%dT00:00:00Z')
-    mkt_query = f"SELECT Id FROM Lead WHERE LeadSource = 'Marketing Inbound' AND CreatedDate >= {start_dt}"
-    mkt_recs = sf.query_all(mkt_query)['records']
+    mkt_query = f"SELECT Id FROM Lead WHERE LeadSource = 'Marketing Inbound' AND CreatedDate >= {start_dt} LIMIT 150"
+    mkt_recs = [r['Id'] for r in sf.query_all(mkt_query)['records']]
     
     base_subject = f"Salesforce Daily Activity Report [{get_india_date_str()}]"
-    data = [
-        ("Date", get_india_full_timestamp()),
-        ("Marketing Inbound Leads Found", f"{len(mkt_recs)} Leads (Last 30 Days)")
-    ]
-    thread_id = send_email_report(base_subject, create_html_body(base_subject, data, "The automation script has started. You will receive a summary upon completion."))
+    thread_id = send_email_report(base_subject, create_html_body(base_subject, [("Total Leads Found", len(mkt_recs))], "Processing with Multi-threading (3 Parallel Workers)..."))
 
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=Options().add_argument("--headless=new"))
-    driver.get(f"https://loop-subscriptions.lightning.force.com/secur/frontdoor.jsp?sid={sf.session_id}")
-    time.sleep(5)
+    # Multi-threading Start (3 Workers ek saath chalenge)
+    all_details = []
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(process_lead_worker, lid, sf.session_id) for lid in mkt_recs]
+        for f in futures:
+            all_details.append(f.result())
 
-    stats = {'updated': 0, 'failed': 0}
-    failed_log = []
+    updated, failed = 0, 0
+    csv_rows = []
 
-    for i, rec in enumerate(mkt_recs):
-        lid = rec['Id']
-        logging.info(f"Processing Lead {i+1}/{len(mkt_recs)}: {lid}")
-        try:
-            count, last_date = scrape_record(driver, lid, 'Lead')
-            if last_date:
+    for lid, count, last_date, err in all_details:
+        if last_date and not err:
+            try:
                 payload = {MKT_API_COUNT: count, MKT_API_DATE: convert_date_for_api(last_date)}
-                sf.Lead.update(lid, payload)
-                stats['updated'] += 1
-        except Exception as e:
-            stats['failed'] += 1
-            failed_log.append(['Lead', lid, str(e)])
+                # SAFETY: Header added to prevent Owner/Assignment change
+                sf.Lead.update(lid, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
+                updated += 1
+                csv_rows.append([lid, count, last_date, "Success"])
+            except Exception as update_err:
+                failed += 1
+                csv_rows.append([lid, 0, None, str(update_err)])
+        else:
+            failed += 1
+            csv_rows.append([lid, 0, None, err or "No Activity Found"])
 
-    driver.quit()
+    # Final Summary Detail Email
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Lead ID', 'Activity Count', 'Last Date', 'Status'])
+    writer.writerows(csv_rows)
     
-    csv_str = None
-    if failed_log:
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(['Type', 'Record ID', 'Error'])
-        writer.writerows(failed_log)
-        csv_str = output.getvalue()
-
     final_html = create_html_body("✅ Marketing Execution Complete", [
-        ("Total Processed", len(mkt_recs)),
-        ("Successfully Updated", stats['updated']),
-        ("Failed", stats['failed'])
-    ], "Check the attached CSV if there are failures.")
+        ("Total Leads Processed", len(mkt_recs)),
+        ("Updated Successfully", updated),
+        ("Failed/Skipped", failed)
+    ], "Each lead's scrape detail is attached in the CSV for tracking.")
     
-    send_email_report(base_subject, final_html, parent_msg_id=thread_id, csv_data=csv_str)
+    send_email_report(base_subject, final_html, parent_msg_id=thread_id, csv_data=output.getvalue())
 
 if __name__ == "__main__":
     main()
