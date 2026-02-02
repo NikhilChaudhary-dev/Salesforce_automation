@@ -158,7 +158,7 @@ def main():
         ("Total Leads (Last 30 Days)", len(recs)), 
         ("Filter Applied", "Sub_Source == 'App Install'"), 
         ("Parallel Workers", "5 Browsers"),
-        ("Execution Mode", "Multi-threaded (English)")
+        ("Execution Mode", "Multi-threaded")
     ]
     
     thread_id = send_email_report(title, create_html_body(title, start_info, "Extracting data for App Install leads only."))
