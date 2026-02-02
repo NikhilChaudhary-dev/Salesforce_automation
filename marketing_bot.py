@@ -1,6 +1,6 @@
 import os, sys, time, logging, smtplib, csv, io
 from email.message import EmailMessage
-from email.utils import make_msgid, formatdate
+from email.utils import formatdate
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from simple_salesforce import Salesforce
@@ -47,6 +47,7 @@ JS_EXPAND_LOGIC = """
                 el.dispatchEvent(new MouseEvent('click', eventOpts));
             } catch(e) { console.error(e); }
         }
+
         function queryDeep(root) {
             let foundElements = [];
             let walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
@@ -65,8 +66,10 @@ JS_EXPAND_LOGIC = """
             for (let el of all) { if (el.shadowRoot) foundElements = foundElements.concat(queryDeep(el.shadowRoot)); }
             return foundElements;
         }
+
         let targets = queryDeep(document.body);
         targets.forEach(btn => triggerClick(btn));
+        
         let others = document.body.querySelectorAll('button');
         others.forEach(btn => {
             let t = (btn.innerText || "").toLowerCase();
@@ -134,14 +137,27 @@ def convert_date_for_api(date_str):
     except: return None
 
 def create_html_body(title, data_rows, footer_note=""):
-    rows_html = "".join([f"<tr><td style='padding:12px;border-bottom:1px solid #e0e0e0;font-weight:bold;width:50%;'>{l}</td><td style='padding:12px;border-bottom:1px solid #e0e0e0;'>{v}</td></tr>" for l, v in data_rows])
+    rows_html = "".join([
+        f"<tr>"
+        f"<td style='padding:12px;border-bottom:1px solid #e0e0e0;font-weight:bold;'>{row[0]}</td>"
+        f"<td style='padding:12px;border-bottom:1px solid #e0e0e0;'>{row[1]}</td>"
+        f"<td style='padding:12px;border-bottom:1px solid #e0e0e0;color:#7f8c8d;font-size:12px;'>{row[2]}</td>"
+        f"</tr>" for row in data_rows
+    ])
     return f"""
     <html>
     <body style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; background-color: #f9f9f9; padding: 20px;">
-        <div style="max-width: 600px; margin: auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+        <div style="max-width: 650px; margin: auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
             <h2 style="color: #2c3e50; margin-top: 0; border-bottom: 2px solid #3498db; padding-bottom: 10px;">📊 {title}</h2>
             <p style="font-size: 14px; color: #7f8c8d; margin-bottom: 20px;">{get_india_full_timestamp()}</p>
-            <table style="width: 100%; border-collapse: collapse;">{rows_html}</table>
+            <table style="width: 100%; border-collapse: collapse;">
+                <tr style="background:#f2f2f2;">
+                    <th style="padding:12px;text-align:left;border-bottom:2px solid #ddd;">Field</th>
+                    <th style="padding:12px;text-align:left;border-bottom:2px solid #ddd;">Detail</th>
+                    <th style="padding:12px;text-align:left;border-bottom:2px solid #ddd;">Reason</th>
+                </tr>
+                {rows_html}
+            </table>
             <p style="margin-top: 25px; font-style: italic; color: #7f8c8d; font-size: 13px;">{footer_note}</p>
             <div style="margin-top: 30px; border-top: 1px solid #eee; padding-top: 15px; font-size: 12px; color: #999; text-align: center;">Automated by <b>Nikhil Chaudhary</b> ⚡</div>
         </div>
@@ -168,10 +184,7 @@ def process_lead_worker(lid, session_id):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    
-    # Use the pre-downloaded driver path
     driver = webdriver.Chrome(service=Service(GLOBAL_DRIVER_PATH), options=options)
-    
     try:
         driver.get(f"https://loop-subscriptions.lightning.force.com/secur/frontdoor.jsp?sid={session_id}")
         time.sleep(5)
@@ -187,81 +200,67 @@ def process_lead_worker(lid, session_id):
         if not valid_dates: return lid, 0, None, None
         valid_dates.sort(key=lambda x: datetime.strptime(x, '%d-%b-%Y'), reverse=True)
         return lid, len(set(valid_dates)), valid_dates[0], None
-    except Exception as e:
-        return lid, 0, None, str(e)
-    finally:
-        driver.quit()
+    except Exception as e: return lid, 0, None, str(e)
+    finally: driver.quit()
 
 # ================= MAIN EXECUTION =================
 def main():
     global GLOBAL_DRIVER_PATH
     try:
         sf = Salesforce(username=SF_USERNAME, password=SF_PASSWORD, security_token=SF_TOKEN)
-    except Exception as e:
-        logging.error(f"SF Connection Failed: {e}"); sys.exit(1)
+    except Exception as e: logging.error(f"SF Connection Failed: {e}"); sys.exit(1)
 
-    # --- 🛠️ FIX: Download Driver ONLY ONCE before threading ---
     logging.info("Downloading Chrome Driver...")
     GLOBAL_DRIVER_PATH = ChromeDriverManager().install()
 
     start_dt = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%dT00:00:00Z')
-    mkt_query = f"""
-        SELECT Id FROM Lead 
-        WHERE LeadSource = 'Marketing Inbound' 
-        AND Sub_Source__c != 'App Install' 
-        AND CreatedDate >= {start_dt} 
-        LIMIT 400
-    """
+    mkt_query = f"SELECT Id FROM Lead WHERE LeadSource = 'Marketing Inbound' AND Sub_Source__c != 'App Install' AND CreatedDate >= {start_dt} LIMIT 400"
     mkt_recs = [r['Id'] for r in sf.query_all(mkt_query)['records']]
     
     total_leads = len(mkt_recs)
-    num_workers = 4
-    leads_per_worker = total_leads // num_workers if total_leads > 0 else 0
-
     base_subject = f"Salesforce Daily Activity Report [{get_india_date_str()}]"
-    start_info = [
-        ("Total Leads Found (Last 30)", total_leads),
-        ("Total Workers Running", f"{num_workers} Browsers (Concurrent)"),
-        ("Distribution", f"{leads_per_worker} Leads per browser"),
-        ("Execution Mode", "Multi-threaded (Fast)")
-    ]
     
-    thread_id = send_email_report(base_subject, create_html_body(base_subject, start_info, "Dividing non-app install tasks across 4 parallel browser instances..."))
+    # Starting Email Info
+    start_info = [("Total Leads Found", total_leads, "N/A"), ("Parallel Workers", "4 Browsers", "N/A")]
+    thread_id = send_email_report(base_subject, create_html_body(base_subject, start_info, "Processing non-app install tasks across 4 parallel browser instances..."))
 
     all_details = []
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [executor.submit(process_lead_worker, lid, sf.session_id) for lid in mkt_recs]
-        for f in futures:
-            all_details.append(f.result())
+        for f in futures: all_details.append(f.result())
 
-    updated, failed = 0, 0
+    stats = {'updated': 0, 'skipped': 0, 'failed': 0}
     csv_rows = []
+
     for lid, count, last_date, err in all_details:
         if last_date and not err:
             try:
                 payload = {MKT_API_COUNT: count, MKT_API_DATE: convert_date_for_api(last_date)}
                 sf.Lead.update(lid, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
-                updated += 1
-                csv_rows.append([lid, count, last_date, "Success"])
+                stats['updated'] += 1
+                csv_rows.append([lid, count, last_date, "Success", "Synced to SF"])
             except Exception as ue:
-                failed += 1
-                csv_rows.append([lid, 0, None, str(ue)])
+                stats['failed'] += 1
+                csv_rows.append([lid, 0, None, "Failed", str(ue)])
+        elif err:
+            stats['failed'] += 1
+            csv_rows.append([lid, 0, None, "Failed", str(err)])
         else:
-            failed += 1
-            csv_rows.append([lid, 0, None, err or "No Activity Found"])
+            stats['skipped'] += 1
+            csv_rows.append([lid, 0, None, "Skipped", "No Activity Found"])
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(['Lead ID', 'Activity Count', 'Last Date', 'Status'])
+    writer.writerow(['Lead ID', 'Activity Count', 'Last Date', 'Status', 'Reason'])
     writer.writerows(csv_rows)
     
-    final_html = create_html_body("✅ Marketing Execution Complete", [
-        ("Total Leads Processed", total_leads),
-        ("Updated Successfully", updated),
-        ("Failed/Skipped", failed)
-    ], "Each lead's scrape detail is attached in the CSV for tracking.")
+    final_info = [
+        ("Total Processed", total_leads, "N/A"),
+        ("Updated", stats['updated'], "Successfully synced"),
+        ("Skipped", stats['skipped'], "No Activity Found"),
+        ("Failed", stats['failed'], "Execution Errors")
+    ]
     
-    send_email_report(base_subject, final_html, parent_msg_id=thread_id, csv_data=output.getvalue())
+    send_email_report(base_subject, create_html_body("✅ Marketing Execution Complete", final_info, "Check CSV for individual details."), parent_msg_id=thread_id, csv_data=output.getvalue())
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
