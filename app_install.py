@@ -118,7 +118,7 @@ def process_worker(lead_info, session_id):
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     
-    # 🛠️ FIX: Using pre-installed driver path to avoid conflict
+    # 🛠️ FIX: Using pre-installed driver path
     driver = webdriver.Chrome(service=Service(GLOBAL_DRIVER_PATH), options=opts)
     
     report_data = {"Lead ID": lid, "Email": email, "Has Activity": "No", "Activity Count": 0, "First Activity Date": "N/A", "Latest Activity Date": "N/A"}
@@ -147,18 +147,18 @@ def main():
     except Exception as e:
         logging.error(f"SF Connection Failed: {e}"); sys.exit(1)
 
-    # 🛠️ FIX: Install driver ONCE before starting threads
+    # 🛠️ FIX: Install driver ONCE before threads start
     logging.info("Initializing WebDriver...")
     GLOBAL_DRIVER_PATH = ChromeDriverManager().install()
 
-    # 🛠️ GLOBAL FILTER: Any Lead (not just Marketing) where Sub_Source is not App Install
-    query = "SELECT Id, Email FROM Lead WHERE Sub_Source__c != 'App Install' AND CreatedDate >= LAST_N_DAYS:30 LIMIT 1000"
+    # 🛠️ QUERY: Get ALL Leads from last 30 days (Removed Exclusion Filter)
+    query = "SELECT Id, Email FROM Lead WHERE CreatedDate >= LAST_N_DAYS:30 LIMIT 1500"
     recs = sf.query_all(query)['records']
     
-    title = f"Activity Extraction Report (Global Leads) [{get_india_date_str()}]"
+    title = f"Activity Extraction Report (All Leads) [{get_india_date_str()}]"
     start_info = [
         ("Total Leads (Last 30 Days)", len(recs)), 
-        ("Filter Applied", "Sub_Source != 'App Install'"), 
+        ("Filter Applied", "All Leads (Including App Install)"), 
         ("Parallel Workers", "5 Browsers"),
         ("Execution Mode", "Multi-threaded (English Format)")
     ]
