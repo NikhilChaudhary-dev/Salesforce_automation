@@ -3,7 +3,7 @@ name: Marketing Bot (Daily at 5 AM IST)
 on:
   workflow_dispatch:      # Manual run ke liye button
   schedule:
-    - cron: '30 23 * * *' # Roz Subah 05:00 AM IST (11:30 PM UTC)
+    - cron: '30 23 * * *' # 05:00 AM IST (11:30 PM UTC)
 
 jobs:
   run-marketing-scraper:
