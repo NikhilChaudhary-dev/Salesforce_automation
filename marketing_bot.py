@@ -2,7 +2,7 @@ import os, sys, time, logging, smtplib, csv, io
 from email.message import EmailMessage
 from email.utils import make_msgid, formatdate
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor # Speed ke liye
+from concurrent.futures import ThreadPoolExecutor
 from simple_salesforce import Salesforce
 
 # Selenium Imports
@@ -30,6 +30,9 @@ MKT_API_DATE  = 'Last_Activity_Date__c'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(message)s')
 
+# Global variable to store driver path to avoid re-downloading in threads
+GLOBAL_DRIVER_PATH = None
+
 # ================= 🛠️ JAVASCRIPT LOGIC (ORIGINAL) 🛠️ =================
 JS_EXPAND_LOGIC = """
     (function() {
@@ -44,7 +47,6 @@ JS_EXPAND_LOGIC = """
                 el.dispatchEvent(new MouseEvent('click', eventOpts));
             } catch(e) { console.error(e); }
         }
-
         function queryDeep(root) {
             let foundElements = [];
             let walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
@@ -63,10 +65,8 @@ JS_EXPAND_LOGIC = """
             for (let el of all) { if (el.shadowRoot) foundElements = foundElements.concat(queryDeep(el.shadowRoot)); }
             return foundElements;
         }
-
         let targets = queryDeep(document.body);
         targets.forEach(btn => triggerClick(btn));
-        
         let others = document.body.querySelectorAll('button');
         others.forEach(btn => {
             let t = (btn.innerText || "").toLowerCase();
@@ -162,12 +162,15 @@ def send_email_report(subject, html, parent_msg_id=None, csv_data=None):
 
 # ================= WORKER FOR THREADING =================
 def process_lead_worker(lid, session_id):
+    global GLOBAL_DRIVER_PATH
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    
+    # Use the pre-downloaded driver path
+    driver = webdriver.Chrome(service=Service(GLOBAL_DRIVER_PATH), options=options)
     
     try:
         driver.get(f"https://loop-subscriptions.lightning.force.com/secur/frontdoor.jsp?sid={session_id}")
@@ -175,15 +178,12 @@ def process_lead_worker(lid, session_id):
         url = BASE_URL.format(obj='Lead', id=lid)
         driver.get(url)
         time.sleep(10)
-        
         for _ in range(3):
             driver.execute_script(JS_EXPAND_LOGIC)
             time.sleep(3)
-            
         cutoff_y = driver.execute_script(JS_GET_CUTOFF)
         raw_items = driver.execute_script(JS_GET_DATES)
         valid_dates = [clean_activity_date(i['text']) for i in raw_items if (cutoff_y == 0 or i['y'] >= (cutoff_y - 10)) and clean_activity_date(i['text'])]
-        
         if not valid_dates: return lid, 0, None, None
         valid_dates.sort(key=lambda x: datetime.strptime(x, '%d-%b-%Y'), reverse=True)
         return lid, len(set(valid_dates)), valid_dates[0], None
@@ -194,12 +194,16 @@ def process_lead_worker(lid, session_id):
 
 # ================= MAIN EXECUTION =================
 def main():
+    global GLOBAL_DRIVER_PATH
     try:
         sf = Salesforce(username=SF_USERNAME, password=SF_PASSWORD, security_token=SF_TOKEN)
     except Exception as e:
         logging.error(f"SF Connection Failed: {e}"); sys.exit(1)
 
-    # 30-Day Filter + Exclusion Logic (No App Install)
+    # --- 🛠️ FIX: Download Driver ONLY ONCE before threading ---
+    logging.info("Downloading Chrome Driver...")
+    GLOBAL_DRIVER_PATH = ChromeDriverManager().install()
+
     start_dt = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%dT00:00:00Z')
     mkt_query = f"""
         SELECT Id FROM Lead 
@@ -215,8 +219,6 @@ def main():
     leads_per_worker = total_leads // num_workers if total_leads > 0 else 0
 
     base_subject = f"Salesforce Daily Activity Report [{get_india_date_str()}]"
-    
-    # 🎨 Email Structure as requested
     start_info = [
         ("Total Leads Found (Last 30)", total_leads),
         ("Total Workers Running", f"{num_workers} Browsers (Concurrent)"),
@@ -234,12 +236,10 @@ def main():
 
     updated, failed = 0, 0
     csv_rows = []
-
     for lid, count, last_date, err in all_details:
         if last_date and not err:
             try:
                 payload = {MKT_API_COUNT: count, MKT_API_DATE: convert_date_for_api(last_date)}
-                # SAFETY: Header to prevent Owner change
                 sf.Lead.update(lid, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
                 updated += 1
                 csv_rows.append([lid, count, last_date, "Success"])
@@ -250,7 +250,6 @@ def main():
             failed += 1
             csv_rows.append([lid, 0, None, err or "No Activity Found"])
 
-    # CSV Summary
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(['Lead ID', 'Activity Count', 'Last Date', 'Status'])
