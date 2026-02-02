@@ -134,7 +134,7 @@ def convert_date_for_api(date_str):
     except: return None
 
 def create_html_body(title, data_rows, footer_note=""):
-    rows_html = "".join([f"<tr><td style='padding:12px;border-bottom:1px solid #e0e0e0;font-weight:bold;width:40%;'>{l}</td><td style='padding:12px;border-bottom:1px solid #e0e0e0;'>{v}</td></tr>" for l, v in data_rows])
+    rows_html = "".join([f"<tr><td style='padding:12px;border-bottom:1px solid #e0e0e0;font-weight:bold;width:50%;'>{l}</td><td style='padding:12px;border-bottom:1px solid #e0e0e0;'>{v}</td></tr>" for l, v in data_rows])
     return f"""
     <html>
     <body style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; background-color: #f9f9f9; padding: 20px;">
@@ -166,13 +166,12 @@ def process_lead_worker(lid, session_id):
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     
     try:
-        # Salesforce Frontdoor Login
         driver.get(f"https://loop-subscriptions.lightning.force.com/secur/frontdoor.jsp?sid={session_id}")
         time.sleep(5)
-        
         url = BASE_URL.format(obj='Lead', id=lid)
         driver.get(url)
         time.sleep(10)
@@ -200,17 +199,35 @@ def main():
     except Exception as e:
         logging.error(f"SF Connection Failed: {e}"); sys.exit(1)
 
-    # 30-Day Filter + Batch Limit of 150 to avoid GitHub Timeout
+    # 30-Day Filter + Exclusion Logic (No App Install)
     start_dt = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%dT00:00:00Z')
-    mkt_query = f"SELECT Id FROM Lead WHERE LeadSource = 'Marketing Inbound' AND CreatedDate >= {start_dt} LIMIT 150"
+    mkt_query = f"""
+        SELECT Id FROM Lead 
+        WHERE LeadSource = 'Marketing Inbound' 
+        AND Sub_Source__c != 'App Install' 
+        AND CreatedDate >= {start_dt} 
+        LIMIT 400
+    """
     mkt_recs = [r['Id'] for r in sf.query_all(mkt_query)['records']]
     
-    base_subject = f"Salesforce Daily Activity Report [{get_india_date_str()}]"
-    thread_id = send_email_report(base_subject, create_html_body(base_subject, [("Total Leads Found", len(mkt_recs))], "Processing with Multi-threading (3 Parallel Workers)..."))
+    total_leads = len(mkt_recs)
+    num_workers = 4
+    leads_per_worker = total_leads // num_workers if total_leads > 0 else 0
 
-    # Multi-threading Start (3 Workers ek saath chalenge)
+    base_subject = f"Salesforce Daily Activity Report [{get_india_date_str()}]"
+    
+    # 🎨 Email Structure as requested
+    start_info = [
+        ("Total Leads Found (Last 30)", total_leads),
+        ("Total Workers Running", f"{num_workers} Browsers (Concurrent)"),
+        ("Distribution", f"{leads_per_worker} Leads per browser"),
+        ("Execution Mode", "Multi-threaded (Fast)")
+    ]
+    
+    thread_id = send_email_report(base_subject, create_html_body(base_subject, start_info, "Dividing non-app install tasks across 4 parallel browser instances..."))
+
     all_details = []
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(process_lead_worker, lid, sf.session_id) for lid in mkt_recs]
         for f in futures:
             all_details.append(f.result())
@@ -222,25 +239,25 @@ def main():
         if last_date and not err:
             try:
                 payload = {MKT_API_COUNT: count, MKT_API_DATE: convert_date_for_api(last_date)}
-                # SAFETY: Header added to prevent Owner/Assignment change
+                # SAFETY: Header to prevent Owner change
                 sf.Lead.update(lid, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
                 updated += 1
                 csv_rows.append([lid, count, last_date, "Success"])
-            except Exception as update_err:
+            except Exception as ue:
                 failed += 1
-                csv_rows.append([lid, 0, None, str(update_err)])
+                csv_rows.append([lid, 0, None, str(ue)])
         else:
             failed += 1
             csv_rows.append([lid, 0, None, err or "No Activity Found"])
 
-    # Final Summary Detail Email
+    # CSV Summary
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(['Lead ID', 'Activity Count', 'Last Date', 'Status'])
     writer.writerows(csv_rows)
     
     final_html = create_html_body("✅ Marketing Execution Complete", [
-        ("Total Leads Processed", len(mkt_recs)),
+        ("Total Leads Processed", total_leads),
         ("Updated Successfully", updated),
         ("Failed/Skipped", failed)
     ], "Each lead's scrape detail is attached in the CSV for tracking.")
