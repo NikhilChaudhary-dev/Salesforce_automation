@@ -1,9 +1,9 @@
-name: Marketing Bot (Manual Trigger Only)
+name: Marketing Bot (Daily at 5 AM IST)
 
 on:
-  workflow_dispatch:      # Manual button to run
-  # schedule:
-  #   - cron: '30 23 * * *' # Uncomment this to enable daily at 05:00 AM IST
+  workflow_dispatch:      # Manual trigger ke liye button
+  schedule:
+    - cron: '30 23 * * *' # 11:30 PM UTC = 05:00 AM IST
 
 jobs:
   run-marketing-scraper:
@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Chrome & Dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
@@ -26,6 +26,7 @@ jobs:
 
       - name: Run Marketing Bot
         env:
+          # Inhe GitHub Settings > Secrets mein add zaroor karna
           SF_USERNAME: ${{ secrets.SF_USERNAME }}
           SF_PASSWORD: ${{ secrets.SF_PASSWORD }}
           SF_TOKEN: ${{ secrets.SF_TOKEN }}
